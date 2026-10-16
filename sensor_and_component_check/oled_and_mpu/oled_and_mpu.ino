@@ -18,16 +18,16 @@ constexpr int OLED_RESET = -1;
 constexpr uint32_t SENSOR_PERIOD_MS = 10;  // 100 Hz
 constexpr uint8_t MPU_WHO_AM_I_REG = 0x75;
 
-// Your standalone-tested shake settings
+// Shake settings; retune after mounting the robot in its case.
 constexpr float SHAKE_THRESHOLD_G = 0.35f;
-constexpr float SHAKE_RELEASE_G = 0.20f;   // hysteresis to prevent noisy re-triggering
+constexpr float SHAKE_RELEASE_G = 0.20f;
 constexpr uint8_t SHAKE_PEAKS_REQUIRED = 3;
 constexpr uint32_t SHAKE_WINDOW_MS = 700;
 constexpr uint32_t SHAKE_LOCKOUT_MS = 1500;
 constexpr uint32_t SHAKE_REARM_STILL_MS = 180;
 constexpr uint32_t SHAKE_REACTION_MS = 1800;
 
-// Starting points for free-fall/landing; tune after safe, mounted testing
+// Starting points for free-fall/landing; tune after safe, mounted testing.
 constexpr float FREEFALL_THRESHOLD_G = 0.35f;
 constexpr float FREEFALL_EXIT_G = 0.65f;
 constexpr float HARD_LANDING_THRESHOLD_G = 1.65f;
@@ -54,7 +54,8 @@ float gyroMagnitudeDps = 0.0f;
 enum class BuddyMode : uint8_t {
   IDLE,
   FREEFALL,
-  SHAKE_REACTION,
+  SHAKE_ANIMATION,
+  ANGRY_REACTION,
   SETTLING
 };
 
@@ -70,6 +71,10 @@ uint32_t shakeLockUntilMs = 0;
 uint32_t shakeWindowStartedMs = 0;
 uint8_t shakePeakCount = 0;
 float shakeWindowMaxDeviationG = 0.0f;
+
+// Shake-reaction quiet timer
+bool reactionCalmTimerActive = false;
+uint32_t reactionCalmSinceMs = 0;
 
 // Free-fall detector state
 bool freeFallArmed = true;
@@ -176,7 +181,7 @@ bool readSensorFrame(float &accelMagG, float &gyroMagDps) {
   const int16_t gyRaw = combineBytes(b[10], b[11]);
   const int16_t gzRaw = combineBytes(b[12], b[13]);
 
-  // Configured below for accelerometer ±2 g and gyro ±250 degrees/second.
+  // Configured for accelerometer ±2 g and gyro ±250 degrees/second.
   const float axG = axRaw / 16384.0f;
   const float ayG = ayRaw / 16384.0f;
   const float azG = azRaw / 16384.0f;
@@ -202,7 +207,7 @@ bool initializeMpu6050() {
   }
 
   // DLPF setting 3; accelerometer ±2 g; gyro ±250 dps.
-  // Sample-rate divider 9 gives approximately 100 Hz with the DLPF enabled.
+  // Sample-rate divider 9 gives approximately 100 Hz with DLPF enabled.
   if (!writeMpuRegister(0x1A, 0x03)) return false;
   if (!writeMpuRegister(0x1B, 0x00)) return false;
   if (!writeMpuRegister(0x1C, 0x00)) return false;
@@ -252,8 +257,7 @@ bool calibrateAtRest() {
     calibrationStdDevG
   );
 
-  // Reject a moving or implausible startup calibration rather than silently
-  // learning a bad baseline.
+  // Reject a moving or implausible startup calibration.
   if (baselineMagnitudeG < 0.75f || baselineMagnitudeG > 1.25f ||
       calibrationStdDevG > 0.08f) {
     Serial.println("Calibration rejected. Reset and keep the robot still.");
@@ -269,23 +273,38 @@ void enterIdle(uint32_t now) {
   modeStartedMs = now;
   freeFallCandidateActive = false;
   settleEyesCentered = false;
+  reactionCalmTimerActive = false;
 
   roboEyes.setMood(DEFAULT);
   roboEyes.setPosition(DEFAULT);
-  roboEyes.setIdleMode(ON, 2, 2);
+  // Keep the eyes still at rest. Autoblinking remains enabled.
+  roboEyes.setIdleMode(OFF, 2, 2);
 }
 
-void enterShakeReaction(uint32_t now, const char *reason) {
-  mode = BuddyMode::SHAKE_REACTION;
+void enterShakeAnimation(uint32_t now) {
+  mode = BuddyMode::SHAKE_ANIMATION;
   modeStartedMs = now;
+  reactionCalmTimerActive = false;
   freeFallCandidateActive = false;
   shakePeakCount = 0;
   shakeWindowMaxDeviationG = 0.0f;
 
   roboEyes.setIdleMode(OFF, 2, 2);
-  roboEyes.setMood(ANGRY);
+  roboEyes.setMood(DEFAULT);
   roboEyes.setPosition(DEFAULT);
   roboEyes.anim_confused();
+
+  Serial.println("Shake detected; playing movement animation");
+}
+
+void enterAngryReaction(uint32_t now, const char *reason) {
+  mode = BuddyMode::ANGRY_REACTION;
+  modeStartedMs = now;
+  reactionCalmTimerActive = false;
+
+  roboEyes.setIdleMode(OFF, 2, 2);
+  roboEyes.setMood(ANGRY);
+  roboEyes.setPosition(DEFAULT);
 
   Serial.printf("%s reaction\n", reason);
 }
@@ -353,6 +372,7 @@ void registerShakePeak(uint32_t now, float deviationG) {
   }
 
   shakePeakCount++;
+
   if (deviationG > shakeWindowMaxDeviationG) {
     shakeWindowMaxDeviationG = deviationG;
   }
@@ -368,7 +388,7 @@ void registerShakePeak(uint32_t now, float deviationG) {
     shakeArmed = false;
     shakeLockUntilMs = now + SHAKE_LOCKOUT_MS;
     shakeCalmTimerActive = false;
-    enterShakeReaction(now, "Shake");
+    enterShakeAnimation(now);
   }
 }
 
@@ -386,7 +406,7 @@ void processShakeDetector(uint32_t now, float magG) {
     shakeAboveThreshold = true;
   }
 
-  // Do not collect peaks while reacting to another event.
+  // Only collect shake peaks while in normal idle mode.
   if (mode != BuddyMode::IDLE) return;
 
   if (newPeak && shakeArmed && timeReached(now, shakeLockUntilMs)) {
@@ -443,6 +463,8 @@ void processFreeFallCandidate(uint32_t now, float magG) {
 
 // ---------- Behavior update ----------
 void updateBuddyMode(uint32_t now, float magG) {
+  const float deviationG = fabsf(magG - baselineMagnitudeG);
+
   switch (mode) {
     case BuddyMode::IDLE:
       break;
@@ -450,11 +472,11 @@ void updateBuddyMode(uint32_t now, float magG) {
     case BuddyMode::FREEFALL: {
       const uint32_t freeFallDuration = now - modeStartedMs;
 
-      // Interpret a high-g impulse as a hard landing only after a
-      // free-fall-like period has already been detected.
+      // Treat a high-g impulse as a hard landing only after free-fall
+      // has already been detected.
       if (magG >= HARD_LANDING_THRESHOLD_G &&
           freeFallDuration <= FREEFALL_MAX_MS) {
-        enterShakeReaction(now, "Hard landing");
+        enterAngryReaction(now, "Hard landing");
         break;
       }
 
@@ -464,8 +486,8 @@ void updateBuddyMode(uint32_t now, float magG) {
         break;
       }
 
-      // Weightless-looking gaze drift: a visual effect, not a claim that
-      // the sensor knows the robot's absolute position or direction.
+      // Visual gaze drift during free-fall; it does not indicate
+      // the robot's absolute position or direction.
       if (elapsedAtLeast(now, lastFloatGazeMs, 450)) {
         static const uint8_t gazeSequence[] = {NE, N, NW, N};
         constexpr uint8_t sequenceLength =
@@ -478,7 +500,20 @@ void updateBuddyMode(uint32_t now, float magG) {
       break;
     }
 
-    case BuddyMode::SHAKE_REACTION:
+    case BuddyMode::SHAKE_ANIMATION:
+      // Wait until acceleration has stayed calm before switching to angry.
+      if (deviationG > SHAKE_RELEASE_G) {
+        reactionCalmTimerActive = false;
+      } else if (!reactionCalmTimerActive) {
+        reactionCalmTimerActive = true;
+        reactionCalmSinceMs = now;
+      } else if (elapsedAtLeast(now, reactionCalmSinceMs,
+                                SHAKE_REARM_STILL_MS)) {
+        enterAngryReaction(now, "Shake");
+      }
+      break;
+
+    case BuddyMode::ANGRY_REACTION:
       if (elapsedAtLeast(now, modeStartedMs, SHAKE_REACTION_MS)) {
         enterIdle(now);
       }
@@ -502,7 +537,8 @@ const char *modeName() {
   switch (mode) {
     case BuddyMode::IDLE: return "IDLE";
     case BuddyMode::FREEFALL: return "FREEFALL";
-    case BuddyMode::SHAKE_REACTION: return "REACTION";
+    case BuddyMode::SHAKE_ANIMATION: return "SHAKE_ANIMATION";
+    case BuddyMode::ANGRY_REACTION: return "ANGRY";
     case BuddyMode::SETTLING: return "SETTLING";
     default: return "?";
   }
@@ -541,7 +577,8 @@ void setup() {
 
   roboEyes.begin(SCREEN_WIDTH, SCREEN_HEIGHT, 30);
   roboEyes.setAutoblinker(ON, 3, 2);
-  roboEyes.setIdleMode(ON, 2, 2);
+  // Disable idle gaze movement; leave autoblinking enabled.
+  roboEyes.setIdleMode(OFF, 2, 2);
   roboEyes.setMood(DEFAULT);
   roboEyes.setPosition(DEFAULT);
 
@@ -552,10 +589,11 @@ void setup() {
 }
 
 void loop() {
-  // Keep the OLED animation updating continuously.
+  // Update OLED animation continuously, including blinking.
   roboEyes.update();
 
   const uint32_t now = millis();
+
   if (!elapsedAtLeast(now, lastSensorReadMs, SENSOR_PERIOD_MS)) {
     return;
   }
