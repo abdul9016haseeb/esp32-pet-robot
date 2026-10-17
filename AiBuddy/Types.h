@@ -26,13 +26,14 @@ struct MotionState {
   bool  freeFalling     = false;
   float shakeEnergy     = 0.f;   // sum of peak deviations in the current shake
   float shakeSeconds    = 0.f;
+  float shakeIntensityG = 0.f;   // MEAN peak deviation of the current shake [g] = how HARD it is (robust to one-off spikes)
   float freeFallSeconds = 0.f;
 };
 
 // Discrete things that happened. Add new types at the end; features ignore ones they don't know.
 enum class EventType : uint8_t {
   ShakeStart,      // -
-  ShakeEnd,        // a = energy, b = duration [s]
+  ShakeEnd,        // a = energy, b = duration [s], c = mean peak deviation [g]
   FreeFallStart,   // -
   FreeFallEnd,     // a = fall duration [s]
   Impact,          // a = peak acceleration [g]
@@ -45,11 +46,12 @@ struct Event {
   EventType type;
   float     a;
   float     b;
+  float     c;
   uint32_t  timeMs;
 };
 
-inline Event makeEvent(EventType t, float a, float b, uint32_t now) {
-  Event e; e.type = t; e.a = a; e.b = b; e.timeMs = now; return e;
+inline Event makeEvent(EventType t, float a, float b, uint32_t now, float c = 0.f) {
+  Event e; e.type = t; e.a = a; e.b = b; e.c = c; e.timeMs = now; return e;
 }
 
 // Tiny fixed ring buffer. Drops the newest event if full (never blocks, never allocates).

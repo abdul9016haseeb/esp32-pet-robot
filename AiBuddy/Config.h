@@ -79,9 +79,8 @@ constexpr uint32_t BLINK_MIN_MS = 2200;
 constexpr uint32_t BLINK_MAX_MS = 5500;
 
 // ---------------- Behaviour ----------------
-constexpr float ANGRY_ENERGY        = 14.f;  // accumulated shake energy (sum of peak deviations, g)
-constexpr float ANGRY_SECONDS       = 2.5f;  // or one continuous shake longer than this
-constexpr float ANNOYANCE_TAU_S     = 8.f;   // how fast annoyance fades
+constexpr float HARD_SHAKE_INTENSITY_G = 0.8f;  // mean peak deviation of a shake: >= this -> dizzy (spiral), below -> angry
+constexpr float ANGRY_PER_SECOND    = 0.5f;  // extra angry time per second of shaking
 constexpr float DIZZY_BASE_S        = 1.5f;
 constexpr float DIZZY_PER_ENERGY    = 0.25f;
 constexpr float DIZZY_MAX_S         = 6.f;

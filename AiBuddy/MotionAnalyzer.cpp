@@ -63,33 +63,53 @@ void MotionAnalyzer::trackImpact(uint32_t now, EventQueue& q) {
   }
 }
 
+// One excursion = one continuous stretch with deviation above the threshold. Its peak is the
+// highest deviation reached, which (unlike the rising-edge sample) really reflects how hard the hit was.
+void MotionAnalyzer::commitExcursion() {
+  winPeaks_.add(excPeak_);
+  if (st_.shaking) {
+    shakePeaks_.add(excPeak_);
+    st_.shakeIntensityG = shakePeaks_.mean();
+  }
+}
+
 void MotionAnalyzer::trackShake(uint32_t now, float dt, EventQueue& q) {
   // Free fall reads ~0 g, i.e. a 1 g "deviation". It must never count as a shake.
   const bool  eligible = !inFF_ && now >= suppressShakeUntil_;
   const float dev      = eligible ? fabsf(st_.magnitude - baseline_) : 0.f;
   const bool  above    = dev > cfg::SHAKE_THRESH_G;
+  const bool  rising   = above && !wasAbove_;
+  const bool  falling  = !above && wasAbove_;
+  wasAbove_ = above;
 
   st_.shakeLevel = phys::smooth(st_.shakeLevel, dev, dt, dev > st_.shakeLevel ? 0.03f : 0.25f);
 
-  if (above && !wasAbove_) {                       // rising edge = one peak
+  if (rising) {                                    // rising edge = one peak
+    excPeak_ = 0;
     if (peaks_ == 0 || now - winStart_ > cfg::SHAKE_WINDOW_MS) {
-      peaks_ = 0; winStart_ = now; winEnergy_ = 0;
+      peaks_ = 0; winStart_ = now; winEnergy_ = 0; winPeaks_.reset();
     }
     peaks_++; winEnergy_ += dev;
     if (st_.shaking) {
       lastPeak_ = now; st_.shakeEnergy += dev;
     } else if (peaks_ >= cfg::SHAKE_PEAKS) {
       st_.shaking = true; shakeStart_ = winStart_; lastPeak_ = now; st_.shakeEnergy = winEnergy_;
+      shakePeaks_ = winPeaks_;                     // excursions that already finished inside the window
       q.push(makeEvent(EventType::ShakeStart, 0, 0, now));
     }
   }
-  wasAbove_ = above;
+  if (above)   excPeak_ = fmaxf(excPeak_, dev);
+  if (falling) commitExcursion();
 
   if (st_.shaking) {
     st_.shakeSeconds = (lastPeak_ - shakeStart_) * 0.001f;
     if (now - lastPeak_ > cfg::SHAKE_END_MS) {     // replaces the old fixed lockout: no double triggers
-      q.push(makeEvent(EventType::ShakeEnd, st_.shakeEnergy, st_.shakeSeconds, now));
-      st_.shaking = false; st_.shakeEnergy = 0; st_.shakeSeconds = 0; peaks_ = 0;
+      const float intensity = shakePeaks_.mean();
+      BUDDY_LOG("[analyzer] shake end: %u peaks, mean %.2f g, max %.2f g, energy %.1f, %.1f s\n",
+                (unsigned)shakePeaks_.n, intensity, shakePeaks_.max, st_.shakeEnergy, st_.shakeSeconds);
+      q.push(makeEvent(EventType::ShakeEnd, st_.shakeEnergy, st_.shakeSeconds, now, intensity));
+      st_.shaking = false; st_.shakeEnergy = 0; st_.shakeSeconds = 0; st_.shakeIntensityG = 0;
+      shakePeaks_.reset(); peaks_ = 0;
     }
   }
 }

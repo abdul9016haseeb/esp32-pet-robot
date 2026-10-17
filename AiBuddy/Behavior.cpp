@@ -43,7 +43,7 @@ void Behavior::onEvent(Context& ctx, const Event& e) {
       enter(Mode::Shaking, ctx);
       break;
     case EventType::ShakeEnd:
-      if (mode_ == Mode::Shaking) onShakeEnd(ctx, e.a, e.b);
+      if (mode_ == Mode::Shaking) onShakeEnd(ctx, e);
       break;
     case EventType::FreeFallStart:
       enter(Mode::FreeFall, ctx);
@@ -60,17 +60,26 @@ void Behavior::onEvent(Context& ctx, const Event& e) {
   }
 }
 
-// After a shake: dizzy if it was brief, angry if it was long or the buddy was already annoyed.
-void Behavior::onShakeEnd(Context& ctx, float energy, float seconds) {
-  annoyance_ += energy;
-  if (annoyance_ > cfg::ANGRY_ENERGY || seconds > cfg::ANGRY_SECONDS) {
-    holdS_ = phys::clampf(cfg::ANGRY_BASE_S + seconds * 0.5f, cfg::ANGRY_BASE_S, cfg::ANGRY_MAX_S);
-    annoyance_ = 0;
-    enter(Mode::Angry, ctx);
-  } else {
-    holdS_ = phys::clampf(cfg::DIZZY_BASE_S + energy * cfg::DIZZY_PER_ENERGY, cfg::DIZZY_BASE_S, cfg::DIZZY_MAX_S);
-    enter(Mode::Dizzy, ctx);
+// Decision rule for a finished shake, based on how HARD it was (strongest peak deviation, in g):
+//   gentle shake (intensity below HARD_SHAKE_INTENSITY_G) -> Angry  "stop poking me"
+//   hard shake   (intensity at/above it)                  -> Dizzy  spiral eyes
+// Intensity = MEAN peak deviation of the shake [g], so one stray spike cannot make a gentle shake "hard".
+// To add a third tier (e.g. a scared reaction for extreme shakes), add one more branch here.
+Behavior::Reaction Behavior::chooseShakeReaction(float energy, float seconds, float intensityG) const {
+  if (intensityG >= cfg::HARD_SHAKE_INTENSITY_G) {
+    const float hold = cfg::DIZZY_BASE_S + energy * cfg::DIZZY_PER_ENERGY;
+    return { Mode::Dizzy, phys::clampf(hold, cfg::DIZZY_BASE_S, cfg::DIZZY_MAX_S) };
   }
+  const float hold = cfg::ANGRY_BASE_S + seconds * cfg::ANGRY_PER_SECOND;
+  return { Mode::Angry, phys::clampf(hold, cfg::ANGRY_BASE_S, cfg::ANGRY_MAX_S) };
+}
+
+void Behavior::onShakeEnd(Context& ctx, const Event& e) {
+  const float energy = e.a, seconds = e.b, intensityG = e.c;
+  const Reaction r = chooseShakeReaction(energy, seconds, intensityG);
+  holdS_ = r.holdS;
+  BUDDY_LOG("[behavior] shake intensity %.2f g (hard >= %.2f g)\n", intensityG, cfg::HARD_SHAKE_INTENSITY_G);
+  enter(r.mode, ctx);
 }
 
 // Landing: squash proportional to impact, then dizzy only after a long fall or a hard hit.
@@ -86,7 +95,6 @@ void Behavior::onImpact(Context& ctx, float peakG) {
 }
 
 void Behavior::update(Context& ctx) {
-  annoyance_ *= expf(-ctx.dt / cfg::ANNOYANCE_TAU_S);
   const float inMode = (ctx.nowMs - modeSince_) * 0.001f;
 
   switch (mode_) {
