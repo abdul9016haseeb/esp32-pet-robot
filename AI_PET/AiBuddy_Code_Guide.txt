@@ -1,5 +1,5 @@
 =====================================================================
- AI BUDDY - CODE GUIDE
+ AI BUDDY - CODE GUIDE  (updated to match the current source)
  ESP32 DevKit V1 + SSD1306 OLED (128x64) + MPU6050
 =====================================================================
 
@@ -119,7 +119,8 @@ namespace cfg, grouped as:
   Motion detect shake, free-fall, impact thresholds
   Eye geometry  size, spacing, travel limits
   Eye physics   spring stiffness, damping, gravity gain, drift...
-  Behaviour     anger/dizzy thresholds and durations
+  Behaviour     shake-reaction thresholds and durations, fall/landing,
+                spin, idle glances
 
 Also holds the BUDDY_DEBUG switch. 1 = serial telemetry and
 state-change logs; 0 = removes them from the build.
@@ -136,19 +137,26 @@ you edit only these four values.
   ImuSample    one reading: acceleration ax/ay/az in g, rotation
                gx/gy/gz in deg/s, dt in seconds
   MotionState  what the analyzer currently believes:
-                 gravity      effective gravity in screen axes
-                 restGravity  the "home" orientation
-                 magnitude    total acceleration in g (1.0 at rest)
-                 spinDps      smoothed rotation speed
-                 shakeLevel   smoothed shake intensity
+                 gravity          effective gravity in screen axes
+                 restGravity      the "home" orientation
+                 magnitude        total acceleration in g (1.0 at rest)
+                 spinDps          smoothed rotation speed
+                 shakeLevel       smoothed shake intensity
                  shaking / freeFalling   booleans
-                 shakeEnergy, shakeSeconds, freeFallSeconds
+                 shakeEnergy      sum of peak deviations in this shake
+                 shakeSeconds     duration of this shake
+                 shakeIntensityG  MEAN peak deviation of this shake [g]
+                                  = how HARD it is
+                 freeFallSeconds
   EventType    ShakeStart, ShakeEnd, FreeFallStart, FreeFallEnd,
                Impact, ButtonA, ButtonB, Custom
-  Event        type + two numbers a, b + timestamp
-                 ShakeEnd:    a = energy, b = duration in seconds
+  Event        type + three numbers a, b, c + timestamp
+                 ShakeEnd:    a = energy, b = duration in seconds,
+                              c = mean peak deviation in g
                  FreeFallEnd: a = fall duration in seconds
                  Impact:      a = peak acceleration in g
+               makeEvent(type, a, b, now, c = 0)  (c is the last,
+               optional argument)
   EventQueue   small ring buffer of 16 events. It never allocates
                memory and never blocks. If it is full, the newest
                event is dropped.
@@ -158,7 +166,7 @@ you edit only these four values.
                One-shots are consumed (reset to zero) by EyePhysics
                on the next tick.
   EyeFrame     final geometry: position offset of each eye, width,
-               height, corner radius, anger, dizzy, dizzy phase
+               height, corner radius, scale, anger, dizzy, dizzy phase
 
 ---------------------------------------------------------------
  Physics.h  - small physics toolkit
@@ -197,7 +205,8 @@ Hardware access only; it does not interpret motion.
 ---------------------------------------------------------------
 Knows nothing about eyes or personality. See section 5 for the
 detection algorithms. It also maintains the home orientation
-(restGravity), see section 4.
+(restGravity), see section 4. PeakStats (in the header) keeps running
+sum / max / count of per-excursion peaks during a shake.
 
 ---------------------------------------------------------------
  EyePhysics.h / .cpp  - motion + intent -> eye geometry
@@ -279,15 +288,16 @@ moved from the HOME pose:
     "keep me still".)
   - restGravity slowly follows the real orientation with time constant
     REST_ADAPT_TAU_S (30 s), but only while the device is calm (not
-    shaking, not falling, magnitude near 1 g). Picking the buddy up and
-    holding it sideways does not pin the eyes to a wall forever.
-    Set REST_ADAPT_TAU_S = 0 to disable this.
+    shaking, not falling, magnitude within 0.1 g of the baseline).
+    Picking the buddy up and holding it sideways does not pin the eyes
+    to a wall forever. Set REST_ADAPT_TAU_S = 0 to disable this.
   - In weightlessness there is no home pose to compare against, so the
     home term is faded out with the "floaty" value.
 
 Resulting tilt response: sag in pixels = tilt(g) * GRAVITY_GAIN / k.
-With GAIN 6000 and k 480, a 90-degree tilt gives about 12.5 px.
-(The LIMIT_X/LIMIT_Y values cap the travel.)
+With GAIN 8000 and k 480, a 90-degree tilt gives about 16.7 px.
+(LIMIT_X = 20 and LIMIT_Y = 17 cap the travel, so a full 90-degree tilt
+on the Y axis just reaches the wall.)
 
 4.4  Walls and bounce
 ---------------------
@@ -341,13 +351,21 @@ magnitude = sqrt(ax^2 + ay^2 + az^2) in g. Rest = about 1.0.
 5.1  Shake
 ----------
   deviation = |magnitude - baseline|
-  A "peak" is a rising edge where deviation goes above SHAKE_THRESH_G
-  (0.35 g, from your bench test).
+  An "excursion" is one continuous stretch where deviation stays above
+  SHAKE_THRESH_G (0.35 g, from your bench test). Its PEAK is the highest
+  deviation reached during that stretch (not the value at the rising
+  edge, which would not reflect how hard the hit really was).
 
-  - 3 peaks within 700 ms  -> ShakeStart event.
-  - While shaking, each new peak adds its deviation to shakeEnergy.
-  - If no new peak arrives for 450 ms -> ShakeEnd event
-    (a = total energy, b = duration in seconds).
+  - Each rising edge counts as one peak for detection:
+    3 peaks within 700 ms  -> ShakeStart event.
+  - While shaking, each new peak adds its deviation to shakeEnergy, and
+    every finished excursion's peak is added to a PeakStats record.
+  - If no new peak arrives for 450 ms -> ShakeEnd event:
+      a = total energy
+      b = duration in seconds
+      c = intensity = MEAN of the excursion peaks [g]
+    The mean (not the max) is used so one stray spike cannot make a
+    gentle shake look hard. Behavior uses c to pick the reaction.
 
 This replaced the old fixed 1.5 s lockout, which caused the double
 trigger you saw in the bench test.
@@ -395,7 +413,7 @@ values (set in Behavior::enter):
 Transitions:
 
   Idle/any -- ShakeStart ------------> Shaking
-  Shaking  -- ShakeEnd --------------> Dizzy OR Angry (decision below)
+  Shaking  -- ShakeEnd --------------> Angry OR Dizzy (decision below)
   any      -- FreeFallStart ---------> FreeFall
   FreeFall -- FreeFallEnd -----------> Landing (if fall >= 0.15 s)
                                        else Idle
@@ -406,15 +424,23 @@ Transitions:
   Dizzy / Angry -- timer runs out ---> Idle
   Idle     -- sustained spinning ----> Dizzy (see below)
 
-Dizzy or angry after a shake:
-  annoyance_ is a running total of recent shake energy. It decays with
-  a time constant of 8 s (ANNOYANCE_TAU_S).
-  - If annoyance_ > 14 (ANGRY_ENERGY) OR the shake lasted longer than
-    2.5 s (ANGRY_SECONDS) -> ANGRY for clamp(3 + duration*0.5, 3, 6) s,
-    and annoyance_ is reset to 0.
-  - Otherwise -> DIZZY for clamp(1.5 + energy*0.25, 1.5, 6) s.
-  So: a short shake makes it dizzy; shaking again soon, or shaking
-  for a long time, makes it angry.
+Angry or dizzy after a shake (Behavior::chooseShakeReaction):
+  The decision depends on how HARD the shake was, i.e. the intensity
+  (mean peak deviation, in g) carried by the ShakeEnd event.
+  - intensity BELOW HARD_SHAKE_INTENSITY_G (0.8 g), a gentle shake
+      -> ANGRY ("stop poking me") for
+         clamp(ANGRY_BASE_S + seconds * ANGRY_PER_SECOND,
+               ANGRY_BASE_S, ANGRY_MAX_S)  = clamp(3 + s*0.5, 3, 6) s
+  - intensity AT OR ABOVE 0.8 g, a hard shake
+      -> DIZZY (spiral eyes) for
+         clamp(DIZZY_BASE_S + energy * DIZZY_PER_ENERGY,
+               DIZZY_BASE_S, DIZZY_MAX_S)  = clamp(1.5 + e*0.25, 1.5, 6) s
+  There is no running "annoyance" total any more; each shake is judged
+  on its own. To add a third tier (e.g. a scared reaction for extreme
+  shakes), add one more branch in chooseShakeReaction().
+
+Landing dizziness: after an Impact, Dizzy for 1.5 s + fall duration if
+the fall lasted > 0.6 s or the impact peak was > 3.5 g.
 
 Spinning: in Idle, if smoothed rotation is above 360 deg/s for more
 than 0.6 s (the gyro is used) -> Dizzy for 2 s. NOTE: the gyro was not
@@ -541,8 +567,8 @@ class ShyFeature : public Feature {
 ----------------------------
   1. Add a name to enum EventType in Types.h (at the END of the list).
   2. Push it with events.push(makeEvent(EventType::X, a, b, millis()));
-     from wherever it is detected (MotionAnalyzer, or the main loop
-     for button reads).
+     (optional fifth argument c) from wherever it is detected
+     (MotionAnalyzer, or the main loop for button reads).
   3. Any feature that cares handles it in onEvent(). Features ignore
      event types they do not know.
 ButtonA and ButtonB already exist in the enum for your two buttons.
@@ -576,14 +602,19 @@ Button pins are NOT defined yet, because I do not know your wiring.
   Eyes bounce more / less off walls      EYE_RESTITUTION
   Easier / harder to trigger a shake     SHAKE_THRESH_G, SHAKE_PEAKS
   Shake counted as finished sooner       SHAKE_END_MS
-  Gets angry sooner / later              ANGRY_ENERGY, ANGRY_SECONDS
+  Angry vs dizzy split (what counts as   HARD_SHAKE_INTENSITY_G
+    a "hard" shake)                        (lower = dizzy more often)
+  Angry lasts longer / shorter           ANGRY_BASE_S, ANGRY_PER_SECOND,
+                                         ANGRY_MAX_S
   Dizzy lasts longer / shorter           DIZZY_BASE_S, DIZZY_PER_ENERGY,
                                          DIZZY_MAX_S
   Free fall detected more easily         FF_ENTER_G (raise), FF_MIN_MS
   Landing squash size                    Behavior::onImpact (the 0.18
                                          factor) and IMPACT_G
+  Landing dizzy more / less often        DIZZY_FALL_S, DIZZY_IMPACT_G
   Floating drift stronger                FLOAT_DRIFT_ACCEL
   Spiral eyes spin faster                DIZZY_SPIN_RAD_S
+  Spin-to-dizzy easier / harder          SPIN_DIZZY_DPS, SPIN_DIZZY_AFTER_S
   Blink more / less often                BLINK_MIN_MS, BLINK_MAX_MS
   Idle glances more / less often         GLANCE_MIN_MS, GLANCE_MAX_MS
   Home pose never re-centres             REST_ADAPT_TAU_S = 0
@@ -592,7 +623,9 @@ Button pins are NOT defined yet, because I do not know your wiring.
 
 Using the serial monitor (115200): with BUDDY_DEBUG 1 it prints every
 200 ms:  mag, gx, gy, shake, spin, mode  - and logs each state change.
-That is the quickest way to see what the sensor thinks is happening.
+After each shake it also prints the measured intensity next to the
+HARD_SHAKE_INTENSITY_G threshold. That is the quickest way to tune the
+angry/dizzy split.
 
 
 =====================================================================
@@ -605,8 +638,10 @@ That is the quickest way to see what the sensor thinks is happening.
   - The OLED and the MPU6050 were each tested alone. The two together
     on one I2C bus, with this firmware, is your real-world test.
   - The gyro (spin to dizzy) was never bench tested.
-  - Angry and dizzy thresholds (ANGRY_ENERGY 14, ANGRY_SECONDS 2.5, etc.)
-    are estimates, not measured values. Expect to tune them.
+  - HARD_SHAKE_INTENSITY_G (0.8 g) and the angry/dizzy durations are
+    estimates, not measured values. Your bench test saw a weakest
+    shake deviation of 0.72 g, so 0.8 g sits inside the range of real
+    shakes. Watch the serial "shake intensity" lines and tune.
   - Sensor timing: each OLED refresh blocks the I2C bus for ~23 ms, so
     the sensor is read about 60-80 times a second, not a steady 100.
     Detection tolerates this. If it ever feels laggy, the cleaner fix
