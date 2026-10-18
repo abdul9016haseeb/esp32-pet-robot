@@ -1,0 +1,59 @@
+=====================================================================
+ 12. APPS MENU + BUTTONS  (append to AiBuddy_Code_Guide.txt)
+=====================================================================
+
+NEW FILES (AiBuddy folder)      Buttons.h/.cpp  debounce -> ButtonPressed / ButtonReleased events
+                                Shell.h/.cpp    screen switching Eyes <-> Menu <-> App
+                                Menu.h/.cpp     list, selection, scrolling, drawing
+                                App.h           App interface + StubApp placeholder
+                                Icons.h         12x12 icons as binary row literals
+                                Ui.h            text helpers (centred, bold)
+CHANGED FILES                   Config.h (pins, debounce, menu layout), Types.h (Button, Screen,
+                                2 event types at the END of EventType), Feature.h (Context gets
+                                `events` and `screen`), AiBuddy.ino (wiring).
+NEW SKETCH                      button_check/button_check.ino (M0 bench test)
+
+12.1 Flow
+  Buttons.poll() -> EventQueue -> Shell.onEvent() -> consumed? else Features.dispatch()
+  Eyes --CENTER--> Menu --CENTER on app--> App --EXIT--> Menu --EXIT or EXIT row--> Eyes
+  The eyes are drawn only while Screen::Eyes. Behavior and the IMU keep running in the menu.
+
+12.2 Button rules
+  - Active LOW, INPUT_PULLUP. A level must hold BTN_DEBOUNCE_MS (30) to count, so shorter
+    blips produce no event.
+  - EXIT acts on RELEASE and is read by the Shell before any app. Apps never handle exit.
+  - An app only receives a release for a button it saw pressed (the CENTER that launched it
+    cannot leak in as a stray release).
+  - In the Eyes screen only CENTER-press is taken by the Shell; other buttons pass to Features.
+
+12.3 Add an app
+  1. class MyApp : public App { name(), draw() required; onEnter/onExit/update/onButton optional }
+  2. Global object in AiBuddy.ino; replace the matching StubApp.
+  3. One MenuEntry line in MENU[]. More than 4 entries scrolls automatically.
+  Apps get UP/DOWN/LEFT/RIGHT/CENTER through onButton(ctx, button, pressed).
+  Keep update()/draw() fast: one cooperative loop, no RTOS.
+
+12.4 Tuning (Config.h)
+  MENU_POLISHED  true = bold title + chevron + bold selection; false = boxed title + inverted bar
+  MENU_ROW_H / MENU_VISIBLE_ROWS / MENU_TOP   layout (4 rows x 12 px fits 64 px)
+  BTN_DEBOUNCE_MS, PIN_BTN_*                  button behaviour and pins
+
+12.5 Not done / known limits
+  - Never run on hardware. Host-tested only (see checklist).
+  - No key auto-repeat; UP/DOWN move one row per press.
+  - Games is a single stub entry; a Games submenu (Dino, Rocket) comes with the games.
+  - Text uses the built-in 6x8 font, smaller than the mock-up images.
+
+12.6 BENCH CHECKLIST (do in order)
+  [ ] 1. Upload button_check.ino. Press each of the 6 buttons: names must match the labels
+         (UP=19, DOWN=18, LEFT=17, RIGHT=16, CENTER=4, EXIT=23). Wrong name = wiring/pin swap.
+  [ ] 2. Note "raw edges" per press. 1-2 = clean, 3+ = bounce (handled). A button that prints
+         nothing is not wired to GND.
+  [ ] 3. Upload AiBuddy. Confirm eyes + shake behavior still work; serial shows "[buddy] ready".
+  [ ] 4. Eyes: CENTER opens the menu (serial "[shell] -> menu"). UP/DOWN/LEFT/RIGHT/EXIT do nothing.
+  [ ] 5. Menu: DOWN/UP move the highlight and wrap; CENTER on CLOCK opens the stub app.
+  [ ] 6. App: LEFT/RIGHT/UP/DOWN do nothing; EXIT returns to the menu.
+  [ ] 7. Menu: EXIT button -> eyes. Menu: EXIT row + CENTER -> eyes.
+  [ ] 8. Shake the board while in the menu: no crash, menu stays. Return to eyes: still reacts.
+  [ ] 9. Watch the screen: no flicker; OLED stays at ~25 fps feel. Rows must not touch the bottom edge.
+  [ ] 10. Hold CENTER on the eyes for 2 s: menu opens once, no repeat.

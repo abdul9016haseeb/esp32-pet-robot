@@ -30,6 +30,12 @@ struct MotionState {
   float freeFallSeconds = 0.f;
 };
 
+// The six physical buttons. Order matches the pin table in Buttons.cpp.
+enum class Button : uint8_t { Up, Down, Left, Right, Center, Exit, Count };
+
+// Which full-screen "mode" the device is in. Eyes = the pet, Menu = apps list, App = a running app.
+enum class Screen : uint8_t { Eyes, Menu, App };
+
 // Discrete things that happened. Add new types at the end; features ignore ones they don't know.
 enum class EventType : uint8_t {
   ShakeStart,      // -
@@ -37,9 +43,11 @@ enum class EventType : uint8_t {
   FreeFallStart,   // -
   FreeFallEnd,     // a = fall duration [s]
   Impact,          // a = peak acceleration [g]
-  ButtonA,         // reserved for the two buttons
-  ButtonB,
-  Custom
+  ButtonA,         // reserved (unused)
+  ButtonB,         // reserved (unused)
+  Custom,
+  ButtonPressed,   // a = Button id (use buttonOf()), debounced press
+  ButtonReleased   // a = Button id, b = how long it was held [s]
 };
 
 struct Event {
@@ -53,6 +61,11 @@ struct Event {
 inline Event makeEvent(EventType t, float a, float b, uint32_t now, float c = 0.f) {
   Event e; e.type = t; e.a = a; e.b = b; e.c = c; e.timeMs = now; return e;
 }
+
+inline Event makeButtonEvent(EventType t, Button btn, float heldS, uint32_t now) {
+  return makeEvent(t, (float)(uint8_t)btn, heldS, now);
+}
+inline Button buttonOf(const Event& e) { return (Button)(uint8_t)(e.a + 0.5f); }
 
 // Tiny fixed ring buffer. Drops the newest event if full (never blocks, never allocates).
 class EventQueue {

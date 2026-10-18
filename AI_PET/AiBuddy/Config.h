@@ -23,6 +23,30 @@ constexpr int      SCREEN_H  = 64;
 constexpr uint16_t C_ON      = 1;   // white pixel
 constexpr uint16_t C_OFF     = 0;
 
+// ---------------- Buttons (wired to GND, INPUT_PULLUP, no resistors) ----------------
+// GPIO 16/17 (RX2/TX2) are plain GPIOs as long as Serial2 is never started.
+constexpr uint8_t  PIN_BTN_UP     = 19;
+constexpr uint8_t  PIN_BTN_DOWN   = 18;
+constexpr uint8_t  PIN_BTN_LEFT   = 17;
+constexpr uint8_t  PIN_BTN_RIGHT  = 16;
+constexpr uint8_t  PIN_BTN_CENTER = 4;
+constexpr uint8_t  PIN_BTN_EXIT   = 23;
+constexpr uint32_t BTN_DEBOUNCE_MS = 30;   // a level must hold this long to count; shorter blips are bounce
+
+// ---------------- Apps menu ----------------
+constexpr const char* MENU_TITLE = "ESP32 APPS";
+constexpr bool MENU_POLISHED   = true;     // true = clean look (bold title, chevron, bold selection)
+                                           // false = classic look (boxed title, inverted selection bar)
+constexpr int  MENU_TITLE_H      = 12;     // title area height [px]
+constexpr int  MENU_TOP          = 14;     // y of the first row
+constexpr int  MENU_ROW_H        = 12;     // 4 rows * 12 px = 48 px -> ends at y = 62
+constexpr int  MENU_VISIBLE_ROWS = 4;      // more entries than this -> list scrolls + scrollbar appears
+constexpr int  MENU_CHEVRON_X    = 2;
+constexpr int  MENU_ICON_X       = 12;
+constexpr int  MENU_TEXT_X       = 28;
+constexpr int  MENU_BAR_X        = 10;     // classic style: inverted selection bar
+constexpr int  MENU_BAR_W        = 112;
+
 // ---------------- Mounting: sensor axes -> screen axes ----------------
 // Screen X = right, screen Y = DOWN. Axis index: 0 = sensor X, 1 = sensor Y, 2 = sensor Z.
 // Check: hold the device upright; the eyes should sag slightly DOWN. If they sag up/sideways,

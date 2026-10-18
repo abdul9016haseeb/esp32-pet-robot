@@ -2,6 +2,8 @@
 //   1. derive from Feature, 2. features.add(&yourFeature) in setup().
 // A feature can read motion, steer the eyes through ctx.intent, react to Events,
 // and draw overlays after the eyes (draw()).
+// Overlay features should check ctx.screen: the eyes (and any overlay meant for them) are only
+// visible while ctx.screen == Screen::Eyes.
 #pragma once
 #include <Adafruit_GFX.h>
 #include "Types.h"
@@ -12,6 +14,8 @@ struct Context {
   const MotionState* motion = nullptr;
   EyeIntent*         intent = nullptr;
   const EyeFrame*    frame  = nullptr;
+  EventQueue*        events = nullptr;             // features may push their own events
+  Screen             screen = Screen::Eyes;        // what is on the display right now
 };
 
 class Feature {
