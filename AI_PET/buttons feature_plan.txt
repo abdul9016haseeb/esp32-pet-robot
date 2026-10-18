@@ -1,0 +1,65 @@
+AI BUDDY - APPS MENU NOTES (2026-10-18)
+
+BOARD
+- Generic ESP32 DevKit V1 (WROOM-32). PSRAM test printed 0 bytes, so GPIO 16/17 are free.
+- Only one side of the board is reachable on the breadboard:
+  D15, D2, D4, RX2, TX2, D5, D18, D19, D21, RX0, TX0, D22, D23
+- D21/D22 = I2C (OLED + MPU6050).
+
+BUTTONS (6 total, wired to GND, INPUT_PULLUP, no resistors)
+- UP     = GPIO 19
+- DOWN   = GPIO 18
+- LEFT   = GPIO 17 (TX2)
+- RIGHT  = GPIO 16 (RX2)
+- CENTER = GPIO 4  (really a SELECT/A button)
+- EXIT   = GPIO 23
+- TX2/RX2 are plain GPIOs as long as Serial2 is never started.
+
+PHYSICAL LAYOUT
+- UP/DOWN/LEFT/RIGHT in a "+" shape with an empty middle.
+- CENTER and EXIT are a separate pair placed together.
+- Risk: EXIT next to CENTER can be hit by accident during a game.
+  Keep a gap of at least one button width, put EXIT on the outer side,
+  and make it feel different (colour or height).
+
+PINS REJECTED
+- GPIO 1, 3 (TX0/RX0): USB serial and debug log
+- GPIO 15: boot strapping pin
+- GPIO 2: strapping pin and onboard LED
+- GPIO 5: strapping pin (kept as a spare)
+- Spares for later: D5, D2
+
+NAVIGATION FLOW
+- Eyes --CENTER--> Apps menu
+- Apps menu: UP/DOWN moves the highlight
+- Apps menu --CENTER--> App running
+- App running --EXIT button--> Apps menu
+- Apps menu --EXIT button or EXIT row--> Eyes
+- The framework reads EXIT before any app, so apps never handle exit.
+- Apps own the 4 arrow buttons and CENTER (LEFT is used in Timer and future games).
+- EXIT triggers on release; presses shorter than ~30 ms are ignored (bounce only).
+
+DECISIONS
+- Rejected: hold CENTER to exit (the game reacts before the hold ends).
+- Rejected: LDR exit (tuning, false triggers).
+- Chosen: a dedicated physical EXIT button.
+- Rejected: LVGL for icons (overkill for 128x64, does not use Adafruit GFX).
+- Icons: 1-bit PROGMEM bitmaps drawn with drawBitmap().
+- Confirmed: CENTER opens the menu from the eyes.
+- Confirmed: the EXIT button also works from the menu and goes to the eyes
+  (same result as the menu's EXIT row, which stays).
+
+OPEN ITEMS
+- Check whether I own a spare tactile button for EXIT (a jumper to GND works for testing).
+- Menu layout does not fit 64 px as drawn: use 3 visible rows with scrolling or smaller icons.
+- Weather needs WiFi, which is not built yet, so it is a stub.
+- Circuit connections still to discuss (breadboard space is tight).
+
+BUILD PLAN (start only on my command)
+- M0 button test sketch (6 pins, serial print, check bounce)
+- M1 Buttons module: debounce, push button events (extend EventType at the end, add EventQueue* to Context)
+- M2 screen switching (Eyes / Menu / App) so the eyes can be hidden
+- M3 MenuFeature: list, selection, scrolling, inverted row, scrollbar (sizes in Config.h)
+- M4 Icons.h: 1-bit PROGMEM bitmaps (16x16 or 32x32), made in a pixel editor and converted with image2cpp
+- M5 app stubs (Clock, Timer, Stopwatch, Dino, Rocket, Weather)
+- Finish: update AiBuddy_Code_Guide.txt and give a hardware bench checklist (code is untested on hardware)
