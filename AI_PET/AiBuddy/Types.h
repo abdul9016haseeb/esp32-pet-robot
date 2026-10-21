@@ -34,7 +34,7 @@ struct MotionState {
 enum class Button : uint8_t { Up, Down, Left, Right, Center, Exit, Count };
 
 // Which full-screen "mode" the device is in. Eyes = the pet, Menu = apps list, App = a running app.
-enum class Screen : uint8_t { Eyes, Menu, App };
+enum class Screen : uint8_t { Eyes, Menu, App, Alert };   // Alert = the timer-finished takeover (owned by the Shell)
 
 // Discrete things that happened. Add new types at the end; features ignore ones they don't know.
 enum class EventType : uint8_t {
@@ -47,7 +47,8 @@ enum class EventType : uint8_t {
   ButtonB,         // reserved (unused)
   Custom,
   ButtonPressed,   // a = Button id (use buttonOf()), debounced press
-  ButtonReleased   // a = Button id, b = how long it was held [s]
+  ButtonReleased,  // a = Button id, b = how long it was held [s]
+  TimerFinished    // countdown timer reached zero (pushed by ClockService; the Shell takes over the screen)
 };
 
 struct Event {

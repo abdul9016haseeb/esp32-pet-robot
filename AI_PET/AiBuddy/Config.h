@@ -120,4 +120,26 @@ constexpr float GLANCE_SPEED        = 140.f; // idle look-around impulse, px/s
 constexpr uint32_t GLANCE_MIN_MS    = 2500;
 constexpr uint32_t GLANCE_MAX_MS    = 6000;
 
+// ---------------- Clock app (ClockService + ClockApp) ----------------
+constexpr int      CLOCK_TAB_H         = 12;    // top tab-bar height [px]
+constexpr uint32_t CLOCK_BLINK_HALF_MS = 500;   // half-period of the flashing colon / TIME'S UP / alert flash
+
+// Countdown timer + time edit
+constexpr uint32_t TIMER_MAX_SEC         = 5999;  // 99:59
+constexpr int      TIMER_ADJUST_STEP_SEC = 1;     // seconds per UP/DOWN step
+constexpr uint32_t BTN_REPEAT_DELAY_MS   = 400;   // hold this long before auto-repeat starts
+constexpr uint32_t BTN_REPEAT_PERIOD_MS  = 150;   // then repeat at this cadence (~6.7 steps/s)
+
+// Timer-finished alert (Shell takeover)
+constexpr uint32_t ALERT_LOCKOUT_MS      = 800;    // all buttons ignored for the first moments of an alert
+constexpr uint32_t ALERT_BUZZ_HALF_MS    = 250;    // buzzer beep on/off half-period while alerting
+constexpr uint32_t ALERT_BUZZ_TIMEOUT_MS = 60000;  // the buzzer gives up after 1 min; the screen stays up
+
+// Buzzer: OPTIONAL active buzzer on the spare pin. Leave BUZZER_ENABLED = false until
+// one is really wired there - the alert flashes the screen instead. If the buzzer
+// draws more than ~10 mA, drive it through a small NPN transistor, not the GPIO.
+// NOTE: D5 glitches HIGH briefly at boot, so a wired buzzer chirps once at power-up.
+constexpr bool     BUZZER_ENABLED = false;
+constexpr uint8_t  PIN_BUZZER     = 5;
+
 }  // namespace cfg

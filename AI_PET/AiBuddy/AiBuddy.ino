@@ -21,6 +21,9 @@
 #include "Behavior.h"
 #include "Buttons.h"
 #include "Shell.h"
+#include "ClockService.h"
+#include "ClockApp.h"
+#include "Buzzer.h"
 
 Adafruit_SSD1306 display(cfg::SCREEN_W, cfg::SCREEN_H, &Wire, -1);
 
@@ -34,10 +37,13 @@ FeatureRegistry features;
 Behavior        behavior;
 Buttons         buttons;
 Shell           shell;
+ClockService    clockService;   // wall clock + countdown timer + stopwatch; ticks in every screen state
 // Future features: declare here, then features.add(&yourFeature) in setup().
 
+Buzzer          buzzer;         // optional active buzzer on the spare pin (no-op until cfg::BUZZER_ENABLED)
+
 // ---- Apps. Replace a StubApp with the real app object when it exists. ----
-StubApp clockApp("CLOCK");
+ClockApp clockApp(clockService);   // shares the service, so a timer set here still fires from any screen
 StubApp weatherApp("WEATHER");
 StubApp gamesApp("GAMES");
 
@@ -92,11 +98,14 @@ void setup() {
   analyzer.configure(imu.baselineG());
 
   buttons.begin();
+  buzzer.begin();                        // no-op until a buzzer is wired (cfg::BUZZER_ENABLED)
+  shell.attachBuzzer(&buzzer);
   shell.begin(MENU, MENU_COUNT);
 
   const uint32_t now = millis();
   eyes.begin(now);
   features.add(&behavior);
+  features.add(&clockService);
   Context ctx = makeContext(now, 0.f);
   features.beginAll(ctx);
 
