@@ -667,5 +667,72 @@ angry/dizzy split.
     no longer used.)
 
 =====================================================================
+ 12. ADDITIONAL DEVELOPMENT INSTRUCTIONS (read before changing anything)
+=====================================================================
+
+This section is the standing rule-set for all future work. The feature
+details live in AiBuddy_Code_Guide_ADDENDUM.txt (sections 12-14) and
+buttons feature_plan.txt; this section is HOW to work, those are WHAT
+to build.
+
+12.1  Working rules
+  - Make the smallest coherent change. One milestone at a time, each
+    on its own git branch, each with its own bench checklist.
+  - Never edit the test sketches (i2c_scanner, sensor_and_component_check,
+    button_check) except to add a new one. They are the ground truth
+    for hardware bring-up.
+  - Do not change pins, I2C addresses, libraries, or the file/module
+    architecture without updating Config.h, this guide, and the plan
+    file in the same commit.
+  - Everything is non-blocking. No delay() anywhere in the firmware
+    except inside fatal(). Use the tick/render timers and dt.
+  - Every tunable number goes in Config.h under the right group.
+    No magic constants in .cpp files.
+  - Add new event types only at the END of enum EventType (Appendix:
+    ordinal values must never change, events may be logged/replayed).
+  - Bound all motion: clamp positions (LIMIT_X/Y), clamp dt (MAX_DT),
+    clamp smoothed values. Never treat raw accelerometer values as
+    position or velocity; they are specific force only (see 4.2).
+  - A feature/App never reads hardware directly. Sensors -> Imu,
+    buttons -> Buttons, screen -> the Shell. Apps receive everything
+    through Context and return intents/drawing.
+  - Keep update() and draw() fast; one cooperative loop, no RTOS
+    tasks, no network calls inside a tick.
+  - If a change was not compiled or run on the board, say so in the
+    commit message and in the checklist. Never claim a test you did
+    not do.
+
+12.2  Where things stand (as of 2026-10-22)
+  - Buttons + apps menu: implemented, host-tested only. See addendum
+    section 12 and its bench checklist (10 items, run in order).
+  - Clock / Timer / Stopwatch app: spec agreed, not yet built.
+    Details: addendum section 13, plan file "M6+".
+  - TimerFinished screen takeover: spec agreed (3 guards). Details:
+    addendum 13.2.
+  - Buzzer: spec written behind a config switch, pin candidate D5.
+    Ownership of a physical buzzer is UNCONFIRMED - the screen-flash
+    fallback must work without it.
+  - Horizontal menu: planned change, breaks bench-checklist item 5.
+    Details: addendum section 14.
+  - SD card game saves, WiFi/Weather, games (Dino, Rocket): stubs
+    only. WiFi+BT together can exhaust RAM on classic ESP32; test
+    one radio at a time.
+
+12.3  Order of work (do not reorder without a reason)
+  Step 1: Clock app (ClockService + Clock/Timer/Stopwatch pages,
+          onBack hook, TimerFinished takeover, Buzzer module).
+  Step 2: Horizontal menu (separate branch, own checklist).
+  Step 3+: Games, Weather, SD saves - only after steps 1 and 2 are
+          bench-tested on the board.
+
+12.4  Definition of done for any milestone
+  [ ] Compiles for ESP32 DevKit V1 with zero warnings in the changed files.
+  [ ] Bench checklist executed on real hardware, results written into
+      the matching test_result.md.
+  [ ] Config.h, this guide, and the plan file updated in the same commit.
+  [ ] No regressions: previous bench checklists still pass.
+
+
+=====================================================================
  END OF GUIDE
 =====================================================================

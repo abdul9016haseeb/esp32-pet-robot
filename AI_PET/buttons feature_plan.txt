@@ -63,3 +63,52 @@ BUILD PLAN (start only on my command)
 - M4 Icons.h: 1-bit PROGMEM bitmaps (16x16 or 32x32), made in a pixel editor and converted with image2cpp
 - M5 app stubs (Clock, Timer, Stopwatch, Dino, Rocket, Weather)
 - Finish: update AiBuddy_Code_Guide.txt and give a hardware bench checklist (code is untested on hardware)
+
+=====================================================================
+ADDITIONAL INSTRUCTIONS (2026-10-22) - CLOCK APP, TAKEOVER, BUZZER, MENU
+=====================================================================
+Continue the milestone plan below. Start only on command, one milestone
+per git branch, each with its own bench checklist (extend section 12.6
+of the addendum). Full specs: addendum sections 13-14, main guide
+section 12.
+
+M6  ClockService + Clock app
+    - ClockService owns all timekeeping, ticked with dt in update().
+    - ClockApp with three pages (CLOCK / TIMER / STOPWATCH),
+      LEFT/RIGHT switches pages.
+    - TIMER: CENTER start/pause/resume, DOWN reset while paused.
+    - STOPWATCH: CENTER start/stop, UP lap, DOWN reset when stopped.
+    - State shown by flashing colon / PAUSE tag / underline - no hints.
+    - onBack() hook added to App/Shell.
+    Replaces the CLOCK StubApp in AiBuddy.ino.
+
+M7  TimerFinished takeover
+    - New TimerFinished event at the END of enum EventType.
+    - ClockService pushes it when the timer reaches zero.
+    - Shell consumes it from any screen (app gets onExit first),
+      opens the flashing Timer page, starts the alert.
+    - Guards: 0.8 s input lockout; buzzer auto-stop at ~60 s;
+      EXIT also dismisses. CENTER dismiss -> eyes, timer reloaded.
+
+M8  Buzzer (behind config switch)
+    - Active buzzer on D5 preferred; expect a boot chirp (D5 pulses
+      at boot). Transistor if > 10 mA.
+    - Non-blocking beep patterns only (no delay()).
+    - cfg::BUZZER_ENABLED = false -> screen-flash alert instead, so
+      the build works with no buzzer fitted.
+    - OPEN: confirm buzzer ownership and type before wiring.
+
+M9  Horizontal menu (separate branch AFTER M6-M8 pass the bench)
+    - 4 slots x 32 px, 24x24 icons, boxed selection, label under the
+      selected slot only. LEFT/RIGHT navigate (wrap), UP/DOWN idle.
+    - Update bench-checklist item 5 in the same commit.
+    - Files: Icons.h, Menu.h/.cpp, Config.h, ~2 lines in Shell.cpp.
+
+WORKING RULES (summary, details in main guide section 12)
+    - Smallest coherent change; preserve pins/libs/architecture.
+    - No delay(), no blocking, tunables only in Config.h.
+    - Extend EventType only at the end; events via Context's queue.
+    - Never edit existing test sketches; add new ones instead.
+    - Every milestone: compiles clean, bench checklist run on hardware,
+      results in test_result.md, guides updated, old checklists re-pass.
+    - Never claim a test that was not run; mark host-tested code as such.
