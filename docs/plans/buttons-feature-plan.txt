@@ -1,0 +1,114 @@
+AI BUDDY - APPS MENU NOTES (2026-10-18)
+
+BOARD
+- Generic ESP32 DevKit V1 (WROOM-32). PSRAM test printed 0 bytes, so GPIO 16/17 are free.
+- Only one side of the board is reachable on the breadboard:
+  D15, D2, D4, RX2, TX2, D5, D18, D19, D21, RX0, TX0, D22, D23
+- D21/D22 = I2C (OLED + MPU6050).
+
+BUTTONS (6 total, wired to GND, INPUT_PULLUP, no resistors)
+- UP     = GPIO 19
+- DOWN   = GPIO 18
+- LEFT   = GPIO 17 (TX2)
+- RIGHT  = GPIO 16 (RX2)
+- CENTER = GPIO 4  (really a SELECT/A button)
+- EXIT   = GPIO 23
+- TX2/RX2 are plain GPIOs as long as Serial2 is never started.
+
+PHYSICAL LAYOUT
+- UP/DOWN/LEFT/RIGHT in a "+" shape with an empty middle.
+- CENTER and EXIT are a separate pair placed together.
+- Risk: EXIT next to CENTER can be hit by accident during a game.
+  Keep a gap of at least one button width, put EXIT on the outer side,
+  and make it feel different (colour or height).
+
+PINS REJECTED
+- GPIO 1, 3 (TX0/RX0): USB serial and debug log
+- GPIO 15: boot strapping pin
+- GPIO 2: strapping pin and onboard LED
+- GPIO 5: strapping pin (kept as a spare)
+- Spares for later: D5, D2
+
+NAVIGATION FLOW
+- Eyes --CENTER--> Apps menu
+- Apps menu: UP/DOWN moves the highlight
+- Apps menu --CENTER--> App running
+- App running --EXIT button--> Apps menu
+- Apps menu --EXIT button or EXIT row--> Eyes
+- The framework reads EXIT before any app, so apps never handle exit.
+- Apps own the 4 arrow buttons and CENTER (LEFT is used in Timer and future games).
+- EXIT triggers on release; presses shorter than ~30 ms are ignored (bounce only).
+
+DECISIONS
+- Rejected: hold CENTER to exit (the game reacts before the hold ends).
+- Rejected: LDR exit (tuning, false triggers).
+- Chosen: a dedicated physical EXIT button.
+- Rejected: LVGL for icons (overkill for 128x64, does not use Adafruit GFX).
+- Icons: 1-bit PROGMEM bitmaps drawn with drawBitmap().
+- Confirmed: CENTER opens the menu from the eyes.
+- Confirmed: the EXIT button also works from the menu and goes to the eyes
+  (same result as the menu's EXIT row, which stays).
+
+OPEN ITEMS
+- Check whether I own a spare tactile button for EXIT (a jumper to GND works for testing).
+- Menu layout does not fit 64 px as drawn: use 3 visible rows with scrolling or smaller icons.
+- Weather needs WiFi, which is not built yet, so it is a stub.
+- Circuit connections still to discuss (breadboard space is tight).
+
+BUILD PLAN (start only on my command)
+- M0 button test sketch (6 pins, serial print, check bounce)
+- M1 Buttons module: debounce, push button events (extend EventType at the end, add EventQueue* to Context)
+- M2 screen switching (Eyes / Menu / App) so the eyes can be hidden
+- M3 MenuFeature: list, selection, scrolling, inverted row, scrollbar (sizes in Config.h)
+- M4 Icons.h: 1-bit PROGMEM bitmaps (16x16 or 32x32), made in a pixel editor and converted with image2cpp
+- M5 app stubs (Clock, Timer, Stopwatch, Dino, Rocket, Weather)
+- Finish: update AiBuddy_Code_Guide.txt and give a hardware bench checklist (code is untested on hardware)
+
+=====================================================================
+ADDITIONAL INSTRUCTIONS (2026-10-22) - CLOCK APP, TAKEOVER, BUZZER, MENU
+=====================================================================
+Continue the milestone plan below. Start only on command, one milestone
+per git branch, each with its own bench checklist (extend section 12.6
+of the addendum). Full specs: addendum sections 13-14, main guide
+section 12.
+
+M6  ClockService + Clock app
+    - ClockService owns all timekeeping, ticked with dt in update().
+    - ClockApp with three pages (CLOCK / TIMER / STOPWATCH),
+      LEFT/RIGHT switches pages.
+    - TIMER: CENTER start/pause/resume, DOWN reset while paused.
+    - STOPWATCH: CENTER start/stop, UP lap, DOWN reset when stopped.
+    - State shown by flashing colon / PAUSE tag / underline - no hints.
+    - onBack() hook added to App/Shell.
+    Replaces the CLOCK StubApp in AiBuddy.ino.
+
+M7  TimerFinished takeover
+    - New TimerFinished event at the END of enum EventType.
+    - ClockService pushes it when the timer reaches zero.
+    - Shell consumes it from any screen (app gets onExit first),
+      opens the flashing Timer page, starts the alert.
+    - Guards: 0.8 s input lockout; buzzer auto-stop at ~60 s;
+      EXIT also dismisses. CENTER dismiss -> eyes, timer reloaded.
+
+M8  Buzzer (behind config switch)
+    - Active buzzer on D5 preferred; expect a boot chirp (D5 pulses
+      at boot). Transistor if > 10 mA.
+    - Non-blocking beep patterns only (no delay()).
+    - cfg::BUZZER_ENABLED = false -> screen-flash alert instead, so
+      the build works with no buzzer fitted.
+    - OPEN: confirm buzzer ownership and type before wiring.
+
+M9  Horizontal menu (separate branch AFTER M6-M8 pass the bench)
+    - 4 slots x 32 px, 24x24 icons, boxed selection, label under the
+      selected slot only. LEFT/RIGHT navigate (wrap), UP/DOWN idle.
+    - Update bench-checklist item 5 in the same commit.
+    - Files: Icons.h, Menu.h/.cpp, Config.h, ~2 lines in Shell.cpp.
+
+WORKING RULES (summary, details in main guide section 12)
+    - Smallest coherent change; preserve pins/libs/architecture.
+    - No delay(), no blocking, tunables only in Config.h.
+    - Extend EventType only at the end; events via Context's queue.
+    - Never edit existing test sketches; add new ones instead.
+    - Every milestone: compiles clean, bench checklist run on hardware,
+      results in test_result.md, guides updated, old checklists re-pass.
+    - Never claim a test that was not run; mark host-tested code as such.

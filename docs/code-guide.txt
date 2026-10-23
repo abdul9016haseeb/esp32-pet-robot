@@ -1,0 +1,738 @@
+=====================================================================
+ AI BUDDY - CODE GUIDE  (updated to match the current source)
+ ESP32 DevKit V1 + SSD1306 OLED (128x64) + MPU6050
+=====================================================================
+
+CONTENTS
+  1. Big picture and data flow
+  2. The main loop (AiBuddy.ino)
+  3. File-by-file reference
+  4. How the physics works
+  5. How motion detection works (shake, free fall, impact)
+  6. How the personality works (Behavior state machine)
+  7. The renderer
+  8. Feature Registry: how to add new features
+  9. Where to change what (tuning table)
+ 10. Known limitations and things not yet tested
+ 11. Arduino IDE gotchas
+
+
+=====================================================================
+ 1. BIG PICTURE AND DATA FLOW
+=====================================================================
+
+The program is a pipeline. Each stage does ONE job and only talks to
+the next stage through plain data structures defined in Types.h.
+
+  MPU6050 chip
+      |  (I2C)
+      v
+  Imu                 reads raw numbers, converts to g and deg/s
+      |  ImuSample
+      v
+  MotionAnalyzer      decides "is it shaking? falling? landing?"
+      |  MotionState (continuous facts) + Events (things that happened)
+      v
+  Features            (Behavior today; clock, timer, buttons... later)
+      |  EyeIntent ("what the eyes should WANT to look like")
+      v
+  EyePhysics          springs, gravity, bounce, blink -> real motion
+      |  EyeFrame (final geometry in pixels)
+      v
+  EyeRenderer         draws shapes
+      |
+      v
+  OLED screen
+
+Why split it like this?
+  - You can test or replace one stage without touching the others.
+    Example: swap the MPU6050 for another sensor by rewriting only
+    Imu.cpp. Nothing else changes.
+  - The "brain" (Behavior) never draws pixels and never reads I2C.
+    The renderer never knows why the eyes look angry.
+  - New features plug in without editing the existing stages.
+
+The core idea: Behavior says "be angry" (EyeIntent.anger = 1). It does
+NOT say how. EyePhysics smooths that value over time and the renderer
+draws the angled eyelids. Each layer owns exactly one responsibility.
+
+
+=====================================================================
+ 2. THE MAIN LOOP (AiBuddy.ino)
+=====================================================================
+
+AiBuddy.ino is the "conductor". It creates one object of each module
+and runs two timers inside loop():
+
+  Simulation tick, every 10 ms (SIM_PERIOD_MS)
+      simulate(now, dt):
+        1. imu.read()                 -> new sensor sample
+        2. analyzer.update()          -> MotionState + Events
+        3. events are popped from the queue and dispatched to every
+           feature (features.dispatch)
+        4. features.updateAll()       -> Behavior sets EyeIntent
+        5. eyes.step()                -> physics advances by dt
+
+  Render tick, every 40 ms (RENDER_PERIOD_MS = 25 fps)
+      render(now):
+        1. display.clearDisplay()
+        2. renderer.draw()            -> eyes
+        3. features.drawAll()         -> overlays on top of the eyes
+        4. display.display()          -> send to screen (~23 ms of I2C)
+
+Why two rates? Physics and sensor reading want to run often and
+smoothly. Sending a full frame to the OLED over I2C is slow (about
+1024 bytes at 400 kHz), so drawing is limited to 25 fps.
+
+dt (delta time) is the real elapsed time since the last tick, clamped
+to 50 ms. All physics uses dt, so behaviour stays the same even if the
+loop runs slower than planned.
+
+Global objects declared at the top of AiBuddy.ino:
+  display, imu, analyzer, eyes, renderer, events, intent, features,
+  behavior.
+This is also where YOU declare new features (see section 8).
+
+setup() does: serial, I2C (400 kHz), OLED init, MPU6050 init,
+calibration ("keep me still"), analyzer configure, eyes.begin(),
+features.add(&behavior), features.beginAll().
+
+Helper functions in the .ino:
+  makeContext()   packages pointers for features (the Context struct)
+  showMessage()   writes two lines of text to the OLED
+  fatal()         shows an error and stops forever (OLED/MPU missing)
+
+
+=====================================================================
+ 3. FILE-BY-FILE REFERENCE
+=====================================================================
+
+---------------------------------------------------------------
+ Config.h  - every tunable number
+---------------------------------------------------------------
+Nothing else in the project hardcodes a constant. Everything is in
+namespace cfg, grouped as:
+  Hardware      pins, I2C speed, OLED/MPU addresses, screen size
+  Mounting      AXIS_SCREEN_X/Y and SIGN_SCREEN_X/Y (see below)
+  Scheduler     SIM_PERIOD_MS, RENDER_PERIOD_MS, MAX_DT
+  IMU           sensor scale factors, calibration limits
+  Motion detect shake, free-fall, impact thresholds
+  Eye geometry  size, spacing, travel limits
+  Eye physics   spring stiffness, damping, gravity gain, drift...
+  Behaviour     shake-reaction thresholds and durations, fall/landing,
+                spin, idle glances
+
+Also holds the BUDDY_DEBUG switch. 1 = serial telemetry and
+state-change logs; 0 = removes them from the build.
+
+Mounting axes: the MPU6050 can be mounted in any orientation, so this
+table maps sensor axes to screen axes. Axis index 0/1/2 = sensor X/Y/Z.
+The sign flips direction. If tilting moves the eyes the wrong way,
+you edit only these four values.
+
+---------------------------------------------------------------
+ Types.h  - shared data, no logic
+---------------------------------------------------------------
+  Vec2         two floats (x, y)
+  ImuSample    one reading: acceleration ax/ay/az in g, rotation
+               gx/gy/gz in deg/s, dt in seconds
+  MotionState  what the analyzer currently believes:
+                 gravity          effective gravity in screen axes
+                 restGravity      the "home" orientation
+                 magnitude        total acceleration in g (1.0 at rest)
+                 spinDps          smoothed rotation speed
+                 shakeLevel       smoothed shake intensity
+                 shaking / freeFalling   booleans
+                 shakeEnergy      sum of peak deviations in this shake
+                 shakeSeconds     duration of this shake
+                 shakeIntensityG  MEAN peak deviation of this shake [g]
+                                  = how HARD it is
+                 freeFallSeconds
+  EventType    ShakeStart, ShakeEnd, FreeFallStart, FreeFallEnd,
+               Impact, ButtonA, ButtonB, Custom
+  Event        type + three numbers a, b, c + timestamp
+                 ShakeEnd:    a = energy, b = duration in seconds,
+                              c = mean peak deviation in g
+                 FreeFallEnd: a = fall duration in seconds
+                 Impact:      a = peak acceleration in g
+               makeEvent(type, a, b, now, c = 0)  (c is the last,
+               optional argument)
+  EventQueue   small ring buffer of 16 events. It never allocates
+               memory and never blocks. If it is full, the newest
+               event is dropped.
+  EyeIntent    what the brain WANTS (see section 6):
+                 anger, dizzy, widen, floaty, tremble, autoBlink
+                 plus two ONE-SHOT fields: squash and kick
+               One-shots are consumed (reset to zero) by EyePhysics
+               on the next tick.
+  EyeFrame     final geometry: position offset of each eye, width,
+               height, corner radius, scale, anger, dizzy, dizzy phase
+
+---------------------------------------------------------------
+ Physics.h  - small physics toolkit
+---------------------------------------------------------------
+  clampf()     limit a value to a range
+  smooth()     exponential smoothing that does not depend on frame
+               rate. tau is the time constant in seconds: after one
+               tau the value is ~63% of the way to the target.
+  Spring1D     one number pulled toward a target by a spring (used
+               for the squash effect)
+  Body2D       a 2D point on a spring with damping, an outside force,
+               and "walls" it bounces off (used for each eye)
+
+Both step() functions split a big dt into pieces of at most 8 ms
+(MAX_SUBSTEP). A stiff spring integrated with a big time step can blow
+up numerically; small sub-steps keep it stable.
+
+---------------------------------------------------------------
+ Imu.h / Imu.cpp  - MPU6050 driver
+---------------------------------------------------------------
+Hardware access only; it does not interpret motion.
+  begin()      checks the chip answers (WHO_AM_I), wakes it, sets
+               low-pass filter ~44 Hz, gyro +/-500 deg/s,
+               accelerometer +/-4 g (extra headroom for impacts)
+  read()       reads 14 bytes in one burst (accel, temperature, gyro),
+               converts to g and deg/s, subtracts gyro bias, and
+               measures the real dt using micros()
+  calibrate()  averages 100 samples over ~1 s. If the board moved
+               during that time, the result is REJECTED and nominal
+               values are used (1.000 g, zero gyro bias), so a bad boot
+               cannot poison detection. Returns true if the board was
+               still.
+
+---------------------------------------------------------------
+ MotionAnalyzer.h / .cpp  - sensor numbers -> meaning
+---------------------------------------------------------------
+Knows nothing about eyes or personality. See section 5 for the
+detection algorithms. It also maintains the home orientation
+(restGravity), see section 4. PeakStats (in the header) keeps running
+sum / max / count of per-excursion peaks during a shake.
+
+---------------------------------------------------------------
+ EyePhysics.h / .cpp  - motion + intent -> eye geometry
+---------------------------------------------------------------
+Pure simulation, no drawing. Owns two Body2D (left and right eye), one
+Spring1D (squash), the blink timer, and the smoothed look parameters.
+See section 4.
+
+---------------------------------------------------------------
+ EyeRenderer.h / .cpp  - draws an EyeFrame
+---------------------------------------------------------------
+See section 7.
+
+---------------------------------------------------------------
+ Feature.h  - extension point
+---------------------------------------------------------------
+Defines Context, Feature and FeatureRegistry. See section 8.
+
+---------------------------------------------------------------
+ Behavior.h / .cpp  - the personality
+---------------------------------------------------------------
+A Feature that turns events into emotional states. See section 6.
+
+
+=====================================================================
+ 4. HOW THE PHYSICS WORKS
+=====================================================================
+
+4.1  Each eye is a mass on a spring
+------------------------------------
+Every eye is a point that can move up to LIMIT_X / LIMIT_Y pixels from
+its resting position. Each physics step it receives three forces:
+
+    acceleration = - k * position          (spring pulls to centre)
+                   - c * velocity          (damping, like friction)
+                   + external force        (gravity, shaking, drift)
+
+then (semi-implicit Euler, in sub-steps of at most 8 ms):
+
+    velocity += acceleration * h
+    position += velocity * h
+
+Current values: k = 480, c = 14.
+  - Natural frequency = sqrt(k) / (2*pi) = about 3.5 Hz
+  - Damping ratio = c / (2*sqrt(k)) = about 0.32  -> UNDERDAMPED
+    That means the eyes overshoot and wobble before settling, like a
+    jelly. A higher c makes them stiffer and calmer.
+
+The left eye uses k x 0.95 and the right eye k x 1.05, so they never
+move in perfect lockstep. This looks more organic.
+
+4.2  Where "gravity" comes from
+-------------------------------
+An accelerometer does not measure gravity directly. It measures
+"specific force": the push the floor (or your hand) applies. Resting on
+a table it reads +1 g pointing up. An object INSIDE the device feels
+the opposite, an effective gravity pointing down. That is exactly what
+we want to feed to the eyes. Three situations then work with no special
+code:
+
+   At rest        1 g pull toward the bottom of the device
+   Shaking        large, rapidly alternating force -> eyes slosh
+   Free fall      sensor reads ~0 g -> no force at all -> eyes float
+
+MotionAnalyzer maps the sensor axes to screen axes using the
+AXIS_/SIGN_ values in Config.h and stores the result in
+MotionState.gravity.
+
+4.3  Home orientation (restGravity)
+-----------------------------------
+If eyes responded to raw gravity, an upright device would permanently
+sag the eyes downward. Instead the eyes respond to how far gravity has
+moved from the HOME pose:
+
+    force = (gravity - restGravity) * GRAVITY_GAIN
+
+  - The first reading after calibration becomes the home pose, so the
+    eyes start centred. (Hold it in your "neutral" pose during
+    "keep me still".)
+  - restGravity slowly follows the real orientation with time constant
+    REST_ADAPT_TAU_S (30 s), but only while the device is calm (not
+    shaking, not falling, magnitude within 0.1 g of the baseline).
+    Picking the buddy up and holding it sideways does not pin the eyes
+    to a wall forever. Set REST_ADAPT_TAU_S = 0 to disable this.
+  - In weightlessness there is no home pose to compare against, so the
+    home term is faded out with the "floaty" value.
+
+Resulting tilt response: sag in pixels = tilt(g) * GRAVITY_GAIN / k.
+With GAIN 8000 and k 480, a 90-degree tilt gives about 16.7 px.
+(LIMIT_X = 20 and LIMIT_Y = 17 cap the travel, so a full 90-degree tilt
+on the Y axis just reaches the wall.)
+
+4.4  Walls and bounce
+---------------------
+When an eye reaches its limit, its position is clamped and its velocity
+is reversed and multiplied by EYE_RESTITUTION (0.45), so it bounces
+back with 45% of the speed.
+
+4.5  Weightlessness ("floaty")
+------------------------------
+EyeIntent.floaty goes from 0 to 1. At 1:
+  - spring stiffness drops by 75% (very soft)
+  - damping drops by 50%
+  - a slow sine/cosine drift force is added, with a different phase for
+    each eye, so they float independently
+Combined with the sensor reading 0 g, this makes the eyes drift near the
+centre like they are floating in the air.
+
+4.6  Squash and stretch
+-----------------------
+squash_ is a Spring1D with target 1.0 (normal height). A landing sets
+its position instantly to e.g. 0.5 (flattened). The spring then
+returns it to 1.0 with overshoot (bouncy). Width is increased as height
+shrinks (x = 1 + (1 - y) * 0.6) so the eye keeps roughly the same
+visual volume.
+
+4.7  Other motion layers
+------------------------
+  Tremble   random small accelerations each tick (angry shiver)
+  Dizzy     eyes are shifted around a small circle (radius
+            DIZZY_ORBIT_PX); the two eyes are 1.6 rad out of phase
+  Kick      a one-shot velocity push. Idle glances use it: a random
+            push, and the spring physics produces the look-around
+  Blink     a timer. The eye height is multiplied by an "openness"
+            value that falls to ~0 and returns in BLINK_SECONDS.
+            Closing is faster (40% of the time) than opening (60%).
+            Random pause of 2.2 - 5.5 s between blinks.
+
+4.8  Smoothing of look parameters
+---------------------------------
+anger, dizzy, widen, floaty, tremble each chase the target in EyeIntent
+with smooth() and a time constant (0.08 - 0.25 s). The brain can flip
+a value instantly, but the eyes ease into it.
+
+
+=====================================================================
+ 5. HOW MOTION DETECTION WORKS (MotionAnalyzer)
+=====================================================================
+
+magnitude = sqrt(ax^2 + ay^2 + az^2) in g. Rest = about 1.0.
+
+5.1  Shake
+----------
+  deviation = |magnitude - baseline|
+  An "excursion" is one continuous stretch where deviation stays above
+  SHAKE_THRESH_G (0.35 g, from your bench test). Its PEAK is the highest
+  deviation reached during that stretch (not the value at the rising
+  edge, which would not reflect how hard the hit really was).
+
+  - Each rising edge counts as one peak for detection:
+    3 peaks within 700 ms  -> ShakeStart event.
+  - While shaking, each new peak adds its deviation to shakeEnergy, and
+    every finished excursion's peak is added to a PeakStats record.
+  - If no new peak arrives for 450 ms -> ShakeEnd event:
+      a = total energy
+      b = duration in seconds
+      c = intensity = MEAN of the excursion peaks [g]
+    The mean (not the max) is used so one stray spike cannot make a
+    gentle shake look hard. Behavior uses c to pick the reaction.
+
+This replaced the old fixed 1.5 s lockout, which caused the double
+trigger you saw in the bench test.
+
+Free fall reads 0 g, which is a 1 g "deviation" from baseline. To stop
+that being counted as a shake, shake detection is switched off during
+free fall and for 300 ms after it (so the landing is not a shake).
+
+5.2  Free fall
+--------------
+  - magnitude below 0.35 g for at least 70 ms -> FreeFallStart
+  - magnitude above 0.60 g again -> FreeFallEnd (a = duration)
+The gap between 0.35 and 0.60 is hysteresis: it stops flickering at the
+threshold. A thrown object also reads ~0 g in the air, so a toss counts
+as free fall too.
+
+5.3  Impact
+-----------
+After free fall ends, the analyzer watches the peak magnitude for 120 ms.
+If the peak is above 1.8 g -> Impact event (a = peak g).
+
+5.4  Other outputs
+------------------
+  shakeLevel   smoothed deviation (fast attack 30 ms, slow decay
+               250 ms), available for continuous effects
+  spinDps      smoothed length of the gyro vector, in deg/s
+
+
+=====================================================================
+ 6. HOW THE PERSONALITY WORKS (Behavior)
+=====================================================================
+
+Behavior is a state machine. Each state is just a PRESET of EyeIntent
+values (set in Behavior::enter):
+
+  State      Intent preset
+  ---------  ----------------------------------------------------
+  Idle       defaults, auto-blink on, random glances
+  Shaking    widen 1.12, tremble 0.4, no blink
+  Dizzy      dizzy 1, widen 0.95, no blink      (spiral eyes)
+  Angry      anger 1, widen 0.92, tremble 0.5, no blink
+  FreeFall   widen 1.3, floaty 1, no blink      (big floating eyes)
+  Landing    widen 1.1, no blink                (waiting for impact)
+
+Transitions:
+
+  Idle/any -- ShakeStart ------------> Shaking
+  Shaking  -- ShakeEnd --------------> Angry OR Dizzy (decision below)
+  any      -- FreeFallStart ---------> FreeFall
+  FreeFall -- FreeFallEnd -----------> Landing (if fall >= 0.15 s)
+                                       else Idle
+  Landing  -- Impact event ----------> squash + downward kick, then
+                                       Dizzy (fall > 0.6 s or peak
+                                       > 3.5 g) else Idle
+  Landing  -- 0.4 s with no impact --> Idle (caught softly)
+  Dizzy / Angry -- timer runs out ---> Idle
+  Idle     -- sustained spinning ----> Dizzy (see below)
+
+Angry or dizzy after a shake (Behavior::chooseShakeReaction):
+  The decision depends on how HARD the shake was, i.e. the intensity
+  (mean peak deviation, in g) carried by the ShakeEnd event.
+  - intensity BELOW HARD_SHAKE_INTENSITY_G (0.8 g), a gentle shake
+      -> ANGRY ("stop poking me") for
+         clamp(ANGRY_BASE_S + seconds * ANGRY_PER_SECOND,
+               ANGRY_BASE_S, ANGRY_MAX_S)  = clamp(3 + s*0.5, 3, 6) s
+  - intensity AT OR ABOVE 0.8 g, a hard shake
+      -> DIZZY (spiral eyes) for
+         clamp(DIZZY_BASE_S + energy * DIZZY_PER_ENERGY,
+               DIZZY_BASE_S, DIZZY_MAX_S)  = clamp(1.5 + e*0.25, 1.5, 6) s
+  There is no running "annoyance" total any more; each shake is judged
+  on its own. To add a third tier (e.g. a scared reaction for extreme
+  shakes), add one more branch in chooseShakeReaction().
+
+Landing dizziness: after an Impact, Dizzy for 1.5 s + fall duration if
+the fall lasted > 0.6 s or the impact peak was > 3.5 g.
+
+Spinning: in Idle, if smoothed rotation is above 360 deg/s for more
+than 0.6 s (the gyro is used) -> Dizzy for 2 s. NOTE: the gyro was not
+part of your bench tests.
+
+Watchdogs: if the Shaking or FreeFall state is active but the analyzer
+says it is over (a lost event), Behavior returns to Idle on its own.
+
+Behavior never draws and never reads hardware. It only reads
+MotionState and Events, and writes EyeIntent.
+
+
+=====================================================================
+ 7. THE RENDERER (EyeRenderer)
+=====================================================================
+
+EyeRenderer is a stateless drawing function. It receives an EyeFrame
+(numbers in pixels) and draws shapes onto any Adafruit_GFX surface.
+Because it only needs the GFX interface, it also works with other
+displays supported by that library (for example an SH1106 or a color
+TFT) with no change except colors.
+
+draw():
+  For each eye (left = side 0, right = side 1):
+    centre x = screen centre +/- half the eye spacing + eye offset
+    centre y = EYE_CENTER_Y + eye offset
+    if dizzy > 0.5 -> drawSpiral()
+    else           -> drawEye()
+
+drawEye():
+  - fillRoundRect with the frame's width, height and corner radius.
+  - If anger > 0.02: a BLACK triangle is drawn over the inner top
+    corner of the eye. The deeper the anger value, the bigger the cut.
+    The triangle slants down toward the nose on both eyes (mirrored),
+    which gives the angry-eyebrow look.
+
+drawSpiral():
+  - A circle outline (radius 15 px x scale) plus a spiral made of 28
+    short line segments, about 2.2 turns. The rotation angle comes
+    from frame.dizzyPhase, and the two eyes spin in opposite directions.
+
+The renderer does not clear or refresh the screen. AiBuddy.ino does
+display.clearDisplay() before and display.display() after. That lets
+features draw overlays between the two steps.
+
+
+=====================================================================
+ 8. FEATURE REGISTRY: HOW TO ADD NEW FEATURES
+=====================================================================
+
+8.1  The pieces (all in Feature.h)
+----------------------------------
+Context: a bundle of things passed to every feature call:
+    nowMs    current time in ms
+    dt       seconds since last tick (0 during draw calls)
+    motion   pointer to read-only MotionState
+    intent   pointer to the EyeIntent you can write to
+    frame    pointer to read-only EyeFrame (current eye geometry)
+
+Feature: a base class (interface) with these functions. All are
+optional except name():
+    name()               a label
+    begin(ctx)           once, at the end of setup()
+    update(ctx)          every simulation tick (10 ms)
+    onEvent(ctx, event)  once per event, for EVERY feature
+    draw(ctx, gfx)       every render, AFTER the eyes are drawn
+
+FeatureRegistry: a fixed list of up to 8 Feature pointers. It has no
+memory allocation. Its functions simply loop over the list:
+    add(&feature)        register a feature (returns false when full)
+    beginAll / updateAll / dispatch / drawAll
+
+Behavior is itself a Feature. It is registered the same way as any new
+feature you add.
+
+8.2  Where new features are declared
+------------------------------------
+Only in AiBuddy.ino. There is a comment marking the spot:
+
+    Behavior        behavior;
+    // Future features: declare here, then features.add(&yourFeature)
+    // in setup().
+
+Steps:
+  1. Create MyFeature.h/.cpp in the sketch folder. Derive from Feature.
+  2. In AiBuddy.ino: #include "MyFeature.h" and declare a global
+     object next to the others.
+  3. In setup(): features.add(&myFeature); (before features.beginAll)
+  4. Nothing else in the project needs editing.
+
+Order matters a little: features run in the order they were added.
+Behavior is added first, so a feature added later can override the
+EyeIntent that Behavior just set during the same tick.
+
+8.3  Example: a clock overlay
+-----------------------------
+// ClockFeature.h
+#pragma once
+#include "Feature.h"
+class ClockFeature : public Feature {
+ public:
+  const char* name() const override { return "clock"; }
+  void draw(Context& ctx, Adafruit_GFX& g) override {
+    // g.setCursor(0, 0); g.print(...time string...);
+  }
+};
+
+// AiBuddy.ino
+#include "ClockFeature.h"
+ClockFeature clockFeature;
+// in setup():  features.add(&clockFeature);
+
+8.4  Example: reacting to events or steering the eyes
+-----------------------------------------------------
+class ShyFeature : public Feature {
+ public:
+  const char* name() const override { return "shy"; }
+  void onEvent(Context& ctx, const Event& e) override {
+    if (e.type == EventType::Impact) ctx.intent->widen = 1.4f;
+  }
+};
+
+8.5  Adding a new event type
+----------------------------
+  1. Add a name to enum EventType in Types.h (at the END of the list).
+  2. Push it with events.push(makeEvent(EventType::X, a, b, millis()));
+     (optional fifth argument c) from wherever it is detected
+     (MotionAnalyzer, or the main loop for button reads).
+  3. Any feature that cares handles it in onEvent(). Features ignore
+     event types they do not know.
+ButtonA and ButtonB already exist in the enum for your two buttons.
+Button pins are NOT defined yet, because I do not know your wiring.
+
+8.6  Current limitations of the extension system (honest list)
+--------------------------------------------------------------
+  - Features cannot push events. The EventQueue is not in Context.
+    For buttons, read the pins in loop() and push events there, or add
+    "EventQueue* events" to Context.
+  - There is no "hide the eyes" switch. A full-screen clock or a game
+    would draw over the eyes. To support that, add a visibility flag
+    (for example in Context or the renderer) and check it in render().
+  - The registry holds at most 8 features (Feature.h, MAX).
+  - WiFi, Bluetooth, SD music and games are NOT implemented. The
+    structure leaves room for them, but each one needs its own code.
+    WiFi + Bluetooth together on a classic ESP32 can run out of RAM
+    and crash, so test them one at a time.
+
+
+=====================================================================
+ 9. WHERE TO CHANGE WHAT (TUNING TABLE)  - all in Config.h
+=====================================================================
+
+  I want...                              Change
+  -------------------------------------  ---------------------------
+  Eyes moving the wrong way on tilt      AXIS_SCREEN_X/Y, SIGN_SCREEN_X/Y
+  More / less movement when tilting      GRAVITY_GAIN (also affects shake)
+  Eyes may travel farther                LIMIT_X, LIMIT_Y
+  Jellier / stiffer eyes                 EYE_STIFFNESS, EYE_DAMPING
+  Eyes bounce more / less off walls      EYE_RESTITUTION
+  Easier / harder to trigger a shake     SHAKE_THRESH_G, SHAKE_PEAKS
+  Shake counted as finished sooner       SHAKE_END_MS
+  Angry vs dizzy split (what counts as   HARD_SHAKE_INTENSITY_G
+    a "hard" shake)                        (lower = dizzy more often)
+  Angry lasts longer / shorter           ANGRY_BASE_S, ANGRY_PER_SECOND,
+                                         ANGRY_MAX_S
+  Dizzy lasts longer / shorter           DIZZY_BASE_S, DIZZY_PER_ENERGY,
+                                         DIZZY_MAX_S
+  Free fall detected more easily         FF_ENTER_G (raise), FF_MIN_MS
+  Landing squash size                    Behavior::onImpact (the 0.18
+                                         factor) and IMPACT_G
+  Landing dizzy more / less often        DIZZY_FALL_S, DIZZY_IMPACT_G
+  Floating drift stronger                FLOAT_DRIFT_ACCEL
+  Spiral eyes spin faster                DIZZY_SPIN_RAD_S
+  Spin-to-dizzy easier / harder          SPIN_DIZZY_DPS, SPIN_DIZZY_AFTER_S
+  Blink more / less often                BLINK_MIN_MS, BLINK_MAX_MS
+  Idle glances more / less often         GLANCE_MIN_MS, GLANCE_MAX_MS
+  Home pose never re-centres             REST_ADAPT_TAU_S = 0
+  Silence serial output                  BUDDY_DEBUG = 0
+  Bigger / smaller eyes                  EYE_W, EYE_H, EYE_RADIUS
+
+Using the serial monitor (115200): with BUDDY_DEBUG 1 it prints every
+200 ms:  mag, gx, gy, shake, spin, mode  - and logs each state change.
+After each shake it also prints the measured intensity next to the
+HARD_SHAKE_INTENSITY_G threshold. That is the quickest way to tune the
+angry/dizzy split.
+
+
+=====================================================================
+ 10. KNOWN LIMITATIONS AND THINGS NOT YET TESTED
+=====================================================================
+
+  - The code was compiled and replayed against synthetic motion on a
+    PC with stubbed Arduino libraries. It was NOT run on real hardware
+    by me. Only YOU have run it on the real board.
+  - The OLED and the MPU6050 were each tested alone. The two together
+    on one I2C bus, with this firmware, is your real-world test.
+  - The gyro (spin to dizzy) was never bench tested.
+  - HARD_SHAKE_INTENSITY_G (0.8 g) and the angry/dizzy durations are
+    estimates, not measured values. Your bench test saw a weakest
+    shake deviation of 0.72 g, so 0.8 g sits inside the range of real
+    shakes. Watch the serial "shake intensity" lines and tune.
+  - Sensor timing: each OLED refresh blocks the I2C bus for ~23 ms, so
+    the sensor is read about 60-80 times a second, not a steady 100.
+    Detection tolerates this. If it ever feels laggy, the cleaner fix
+    is putting the display on a second I2C bus.
+  - After mounting in a case, rerun shake and free-fall tests, because
+    case vibration changes the readings.
+  - Physics runs in a single cooperative loop, no RTOS tasks. That keeps
+    it simple and safe, but a slow feature (for example a long network
+    call inside update()) would freeze the eyes. Keep update() fast.
+
+
+=====================================================================
+ 11. ARDUINO IDE GOTCHAS
+=====================================================================
+
+  - The sketch folder must be named AiBuddy and contain AiBuddy.ino.
+  - Arduino auto-generates function prototypes for the .ino file. It
+    drops [[noreturn]] and can mishandle default arguments, which is
+    why fatal() and showMessage() are written the way they are. Keep
+    that in mind if you add functions to the .ino. Functions inside
+    .cpp/.h files are not affected.
+  - Libraries needed: Adafruit SSD1306 and Adafruit GFX. (RoboEyes is
+    no longer used.)
+
+=====================================================================
+ 12. ADDITIONAL DEVELOPMENT INSTRUCTIONS (read before changing anything)
+=====================================================================
+
+This section is the standing rule-set for all future work. The feature
+details live in AiBuddy_Code_Guide_ADDENDUM.txt (sections 12-14) and
+buttons feature_plan.txt; this section is HOW to work, those are WHAT
+to build.
+
+12.1  Working rules
+  - Make the smallest coherent change. One milestone at a time, each
+    on its own git branch, each with its own bench checklist.
+  - Never edit the test sketches (i2c_scanner, sensor_and_component_check,
+    button_check) except to add a new one. They are the ground truth
+    for hardware bring-up.
+  - Do not change pins, I2C addresses, libraries, or the file/module
+    architecture without updating Config.h, this guide, and the plan
+    file in the same commit.
+  - Everything is non-blocking. No delay() anywhere in the firmware
+    except inside fatal(). Use the tick/render timers and dt.
+  - Every tunable number goes in Config.h under the right group.
+    No magic constants in .cpp files.
+  - Add new event types only at the END of enum EventType (Appendix:
+    ordinal values must never change, events may be logged/replayed).
+  - Bound all motion: clamp positions (LIMIT_X/Y), clamp dt (MAX_DT),
+    clamp smoothed values. Never treat raw accelerometer values as
+    position or velocity; they are specific force only (see 4.2).
+  - A feature/App never reads hardware directly. Sensors -> Imu,
+    buttons -> Buttons, screen -> the Shell. Apps receive everything
+    through Context and return intents/drawing.
+  - Keep update() and draw() fast; one cooperative loop, no RTOS
+    tasks, no network calls inside a tick.
+  - If a change was not compiled or run on the board, say so in the
+    commit message and in the checklist. Never claim a test you did
+    not do.
+
+12.2  Where things stand (as of 2026-10-22)
+  - Buttons + apps menu: implemented, host-tested only. See addendum
+    section 12 and its bench checklist (10 items, run in order).
+  - Clock / Timer / Stopwatch app: spec agreed, not yet built.
+    Details: addendum section 13, plan file "M6+".
+  - TimerFinished screen takeover: spec agreed (3 guards). Details:
+    addendum 13.2.
+  - Buzzer: spec written behind a config switch, pin candidate D5.
+    Ownership of a physical buzzer is UNCONFIRMED - the screen-flash
+    fallback must work without it.
+  - Horizontal menu: planned change, breaks bench-checklist item 5.
+    Details: addendum section 14.
+  - SD card game saves, WiFi/Weather, games (Dino, Rocket): stubs
+    only. WiFi+BT together can exhaust RAM on classic ESP32; test
+    one radio at a time.
+
+12.3  Order of work (do not reorder without a reason)
+  Step 1: Clock app (ClockService + Clock/Timer/Stopwatch pages,
+          onBack hook, TimerFinished takeover, Buzzer module).
+  Step 2: Horizontal menu (separate branch, own checklist).
+  Step 3+: Games, Weather, SD saves - only after steps 1 and 2 are
+          bench-tested on the board.
+
+12.4  Definition of done for any milestone
+  [ ] Compiles for ESP32 DevKit V1 with zero warnings in the changed files.
+  [ ] Bench checklist executed on real hardware, results written into
+      the matching test_result.md.
+  [ ] Config.h, this guide, and the plan file updated in the same commit.
+  [ ] No regressions: previous bench checklists still pass.
+
+
+=====================================================================
+ END OF GUIDE
+=====================================================================

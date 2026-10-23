@@ -1,0 +1,151 @@
+=====================================================================
+ 12. APPS MENU + BUTTONS  (append to AiBuddy_Code_Guide.txt)
+=====================================================================
+
+NEW FILES (AiBuddy folder)      Buttons.h/.cpp  debounce -> ButtonPressed / ButtonReleased events
+                                Shell.h/.cpp    screen switching Eyes <-> Menu <-> App
+                                Menu.h/.cpp     list, selection, scrolling, drawing
+                                App.h           App interface + StubApp placeholder
+                                Icons.h         12x12 icons as binary row literals
+                                Ui.h            text helpers (centred, bold)
+CHANGED FILES                   Config.h (pins, debounce, menu layout), Types.h (Button, Screen,
+                                2 event types at the END of EventType), Feature.h (Context gets
+                                `events` and `screen`), AiBuddy.ino (wiring).
+NEW SKETCH                      button_check/button_check.ino (M0 bench test)
+
+12.1 Flow
+  Buttons.poll() -> EventQueue -> Shell.onEvent() -> consumed? else Features.dispatch()
+  Eyes --CENTER--> Menu --CENTER on app--> App --EXIT--> Menu --EXIT or EXIT row--> Eyes
+  The eyes are drawn only while Screen::Eyes. Behavior and the IMU keep running in the menu.
+
+12.2 Button rules
+  - Active LOW, INPUT_PULLUP. A level must hold BTN_DEBOUNCE_MS (30) to count, so shorter
+    blips produce no event.
+  - EXIT acts on RELEASE and is read by the Shell before any app. Apps never handle exit.
+  - An app only receives a release for a button it saw pressed (the CENTER that launched it
+    cannot leak in as a stray release).
+  - In the Eyes screen only CENTER-press is taken by the Shell; other buttons pass to Features.
+
+12.3 Add an app
+  1. class MyApp : public App { name(), draw() required; onEnter/onExit/update/onButton optional }
+  2. Global object in AiBuddy.ino; replace the matching StubApp.
+  3. One MenuEntry line in MENU[]. More than 4 entries scrolls automatically.
+  Apps get UP/DOWN/LEFT/RIGHT/CENTER through onButton(ctx, button, pressed).
+  Keep update()/draw() fast: one cooperative loop, no RTOS.
+
+12.4 Tuning (Config.h)
+  MENU_POLISHED  true = bold title + chevron + bold selection; false = boxed title + inverted bar
+  MENU_ROW_H / MENU_VISIBLE_ROWS / MENU_TOP   layout (4 rows x 12 px fits 64 px)
+  BTN_DEBOUNCE_MS, PIN_BTN_*                  button behaviour and pins
+
+12.5 Not done / known limits
+  - Never run on hardware. Host-tested only (see checklist).
+  - No key auto-repeat; UP/DOWN move one row per press.
+  - Games is a single stub entry; a Games submenu (Dino, Rocket) comes with the games.
+  - Text uses the built-in 6x8 font, smaller than the mock-up images.
+
+12.6 BENCH CHECKLIST (do in order)
+  [ ] 1. Upload button_check.ino. Press each of the 6 buttons: names must match the labels
+         (UP=19, DOWN=18, LEFT=17, RIGHT=16, CENTER=4, EXIT=23). Wrong name = wiring/pin swap.
+  [ ] 2. Note "raw edges" per press. 1-2 = clean, 3+ = bounce (handled). A button that prints
+         nothing is not wired to GND.
+  [ ] 3. Upload AiBuddy. Confirm eyes + shake behavior still work; serial shows "[buddy] ready".
+  [ ] 4. Eyes: CENTER opens the menu (serial "[shell] -> menu"). UP/DOWN/LEFT/RIGHT/EXIT do nothing.
+  [ ] 5. Menu: DOWN/UP move the highlight and wrap; CENTER on CLOCK opens the stub app.
+  [ ] 6. App: LEFT/RIGHT/UP/DOWN do nothing; EXIT returns to the menu.
+  [ ] 7. Menu: EXIT button -> eyes. Menu: EXIT row + CENTER -> eyes.
+  [ ] 8. Shake the board while in the menu: no crash, menu stays. Return to eyes: still reacts.
+  [ ] 9. Watch the screen: no flicker; OLED stays at ~25 fps feel. Rows must not touch the bottom edge.
+  [ ] 10. Hold CENTER on the eyes for 2 s: menu opens once, no repeat.
+
+
+=====================================================================
+ 13. CLOCK / TIMER / STOPWATCH + TIMER TAKEOVER + BUZZER (spec, not built)
+=====================================================================
+Status: spec agreed with the user, code not written. The Clock app
+files (ClockApp.h/.cpp, ClockService.h/.cpp) exist in the repo but are
+NOT part of the uploaded source reviewed here; when they land, replace
+this section with a real file-by-file description.
+
+13.1  Clock app structure
+  - ClockService OWNS time. It holds the clock value, the timer
+    countdown and the stopwatch elapsed time, and it ticks them from
+    update(ctx) using dt - never millis() arithmetic inside apps.
+    Apps are dumb views: they read ClockService state and draw it.
+  - Three pages inside the one app: CLOCK, TIMER, STOPWATCH.
+    LEFT/RIGHT switch pages (matches the horizontal menu navigation).
+  - CLOCK: display only.
+  - TIMER: CENTER start/pause/resume; while paused, DOWN resets.
+    A flashing colon means running; a small PAUSE tag means paused.
+  - STOPWATCH: CENTER start/stop; UP lap; DOWN resets when stopped.
+  - No on-screen button hints. State is shown by the underline
+    (editing), flashing colon (running) and PAUSE tag (paused).
+  - App gets an onBack() hook (App/Shell change) so EXIT can return
+    to the menu without leaking state.
+
+13.2  TimerFinished takeover (Timer reaches zero)
+  Flow:
+    ClockService detects zero -> pushes a new TimerFinished event
+    (Context already carries EventQueue* - no framework change).
+    Shell.onEvent() consumes it from ANY screen (eyes, menu, or a
+    running app). A running app receives onExit() first.
+    The Shell opens the Timer page with 00:00:00 flashing and starts
+    the alert. CENTER stops the alert: back to eyes, timer reloads
+    its last set duration, one more CENTER restarts it.
+  Three required guards:
+    1. Input lockout: ignore all buttons for the first ~0.8 s of the
+       alert, so a player mashing CENTER cannot dismiss it unseen.
+    2. Auto-stop: silence the buzzer after ~60 s; the flashing screen
+       stays until dismissed.
+    3. EXIT also dismisses: EXIT belongs to the Shell already, so it
+       must end the alert too, else it feels broken.
+  Known risk (accepted): the takeover interrupts a running game and
+    its score is lost. Returning to the previous screen was rejected
+    by the user. Revisit if games become important.
+
+13.3  Buzzer rules
+  - Candidate pin D5 (the only spare). NOTE: D5 outputs a short boot
+    pulse, so a directly wired buzzer may chirp at power-up. Harmless,
+    but expected.
+  - Prefer an ACTIVE buzzer (beeps on plain HIGH). All patterns are
+    timed in code (nextBeepMs style), never delay().
+  - If the buzzer draws more than ~10 mA, drive it through a small
+    NPN transistor, not straight from the GPIO.
+  - Everything sits behind a config switch (e.g. cfg::BUZZER_ENABLED).
+    With the switch off, the alert degrades to a screen flash, so the
+    firmware is fully usable with no buzzer fitted.
+  - OPEN: user has not confirmed owning a buzzer, or whether it is
+    active or passive. Until confirmed, ship the screen-flash path.
+
+=====================================================================
+ 14. HORIZONTAL MENU (planned change - separate branch, step 2)
+=====================================================================
+  - Layout: 4 slots of 32 px, 24x24 icons, selected icon gets a box;
+    only the selected entry's label drawn, centred underneath
+    (rows: title 0-11, icons y=16-46, label y=54). "WEATHER" is 42 px
+    wide, so labels under every slot do not fit.
+  - Navigation: LEFT/RIGHT move the highlight (wrapping). UP/DOWN do
+    nothing in the menu - this matches the Clock app's LEFT/RIGHT page
+    switching. WARNING: this breaks addendum bench-checklist item 5
+    (UP/DOWN move the highlight); update the checklist in the same commit.
+  - More than 4 entries scrolls the window; existing scroll logic
+    carries over.
+  - Icons: redraw the four Icons.h entries as 24-row binary literals
+    in the current format so they stay hand-editable. Verify on the
+    real screen - mock-up looks cannot be judged from here.
+  - Files touched: Icons.h, Menu.h/.cpp, Config.h (menu constants),
+    ~2 lines in Shell.cpp. Do NOT mix this with step 1 (Clock).
+
+=====================================================================
+ 15. ADDITIONAL INSTRUCTIONS FOR FUTURE SESSIONS
+=====================================================================
+  - Follow main-guide section 12 (working rules) at all times.
+  - Keep step 1 and step 2 on separate git branches with separate
+    bench checklists; two changes at once make a regression untraceable.
+  - Every new module arrives with: Config.h tunables, a section in
+    this addendum, and checklist items. No silent features.
+  - If hardware facts change (buzzer ownership, pin swaps, case
+    mounting), update buttons feature_plan.txt AND re-run the full
+    bench checklist, because case vibration changes shake thresholds.
+  - Never claim hardware tests that were not run. Host-tested code
+    must say "host-tested only" in the commit and the checklist.
